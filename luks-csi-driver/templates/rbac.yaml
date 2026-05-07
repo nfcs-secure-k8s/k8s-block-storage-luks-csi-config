@@ -1,0 +1,78 @@
+---
+# Controller ClusterRole — PV/PVC management, leader election leases, events.
+# patch on persistentvolumes is also used by the Vault sync thread to annotate
+# PVs with the current Vault key version.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "luks-csi-driver.fullname" . }}-controller
+  labels:
+    {{- include "luks-csi-driver.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [persistentvolumes]
+    verbs: [get, list, watch, create, delete, patch]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses]
+    verbs: [get, list, watch]
+  - apiGroups: [storage.k8s.io]
+    resources: [csinodes]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch, update]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "luks-csi-driver.fullname" . }}-controller
+  labels:
+    {{- include "luks-csi-driver.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "luks-csi-driver.controllerServiceAccount" . }}
+    namespace: {{ .Values.namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "luks-csi-driver.fullname" . }}-controller
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Node ClusterRole — LUKS keys are fetched from Vault directly (no secrets:get
+# needed). PVs are read for device path info; nodes for NodeGetInfo.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "luks-csi-driver.fullname" . }}-node
+  labels:
+    {{- include "luks-csi-driver.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [persistentvolumes]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "luks-csi-driver.fullname" . }}-node
+  labels:
+    {{- include "luks-csi-driver.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "luks-csi-driver.nodeServiceAccount" . }}
+    namespace: {{ .Values.namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "luks-csi-driver.fullname" . }}-node
+  apiGroup: rbac.authorization.k8s.io

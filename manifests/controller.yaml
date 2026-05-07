@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: luks-csi-controller
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: luks-csi-controller
+  template:
+    metadata:
+      labels:
+        app: luks-csi-controller
+    spec:
+      serviceAccountName: luks-csi-controller
+      containers:
+        # Our driver (controller mode)
+        - name: luks-csi
+          image: luks-csi:dev
+          imagePullPolicy: Never   # change to IfNotPresent/Always for registry images
+          env:
+            - name: CSI_ENDPOINT
+              value: /csi/csi.sock
+            - name: CSI_MODE
+              value: controller
+            - name: VAULT_ADDR
+              value: "http://vault.default.svc.cluster.local:8200"
+            - name: VAULT_ROLE
+              value: "luks-operator-role"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+
+        # Sidecar: watches for PVCs using our StorageClass and calls
+        # CreateVolume / DeleteVolume on our driver, then creates/deletes PVs.
+        - name: external-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
+          args:
+            - --csi-address=/csi/csi.sock
+            - --leader-election
+            - --leader-election-namespace=kube-system
+            - --v=5
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+
+      volumes:
+        - name: socket-dir
+          emptyDir: {}

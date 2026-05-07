@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "luks-csi-driver.fullname" . }}-node
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "luks-csi-driver.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "luks-csi-driver.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: node
+  template:
+    metadata:
+      labels:
+        {{- include "luks-csi-driver.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: node
+      {{- if .Values.apparmor.annotate }}
+      annotations:
+        # Restricts the privileged container to LUKS/mount operations only.
+        # Requires the profile to be loaded on each node first — see apparmor-profile.yaml.
+        container.apparmor.security.beta.kubernetes.io/luks-csi: localhost/k8s-luks-restricted
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "luks-csi-driver.nodeServiceAccount" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: luks-csi
+          image: {{ include "luks-csi-driver.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            privileged: true
+          env:
+            - name: CSI_ENDPOINT
+              value: /csi/csi.sock
+            - name: CSI_MODE
+              value: node
+            # Disable udev synchronisation to prevent cryptsetup hangs in
+            # container environments where udev is not running.
+            - name: CRYPTSETUP_UDEV_SYNC_DISABLE
+              value: "1"
+            {{- include "luks-csi-driver.vaultEnv" . | nindent 12 }}
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: pods-mount-dir
+              mountPath: /var/lib/kubelet/pods
+              mountPropagation: Bidirectional
+            - name: dev-dir
+              mountPath: /dev
+
+        - name: node-driver-registrar
+          image: {{ .Values.sidecars.nodeDriverRegistrar.image }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/{{ .Values.driverName }}/csi.sock
+            - --v=5
+          lifecycle:
+            preStop:
+              exec:
+                command: [/bin/sh, -c, "rm -f /registration/{{ .Values.driverName }}-reg.sock"]
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+
+      volumes:
+        - name: plugin-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/{{ .Values.driverName }}
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: Directory
+        - name: pods-mount-dir
+          hostPath:
+            path: /var/lib/kubelet/pods
+            type: Directory
+        - name: dev-dir
+          hostPath:
+            path: /dev
+            type: Directory

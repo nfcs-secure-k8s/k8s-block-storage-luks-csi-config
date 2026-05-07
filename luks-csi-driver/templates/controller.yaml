@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "luks-csi-driver.fullname" . }}-controller
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "luks-csi-driver.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.controller.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "luks-csi-driver.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        {{- include "luks-csi-driver.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: {{ include "luks-csi-driver.controllerServiceAccount" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: luks-csi
+          image: {{ include "luks-csi-driver.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: CSI_ENDPOINT
+              value: /csi/csi.sock
+            - name: CSI_MODE
+              value: controller
+            - name: VAULT_SYNC_INTERVAL
+              value: {{ .Values.vault.syncInterval | quote }}
+            {{- include "luks-csi-driver.vaultEnv" . | nindent 12 }}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+
+        - name: external-provisioner
+          image: {{ .Values.sidecars.provisioner.image }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --leader-election
+            - --leader-election-namespace={{ .Values.namespace }}
+            - --v=5
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+
+      volumes:
+        - name: socket-dir
+          emptyDir: {}

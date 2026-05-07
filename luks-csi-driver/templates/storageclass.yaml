@@ -1,0 +1,17 @@
+{{- if .Values.storageClass.enabled }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.storageClass.name }}
+  labels:
+    {{- include "luks-csi-driver.labels" . | nindent 4 }}
+provisioner: {{ .Values.driverName }}
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+parameters:
+  backingStorageClass: {{ .Values.storageClass.backingStorageClass | quote }}
+  luksType: {{ .Values.storageClass.luksType | quote }}
+  filesystem: {{ .Values.storageClass.filesystem | quote }}
+  institution: {{ .Values.storageClass.institution | quote }}
+  deletionPolicy: {{ .Values.storageClass.deletionPolicy | quote }}
+{{- end }}

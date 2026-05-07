@@ -1,0 +1,109 @@
+# Test resources for Lima/k3s environment using a loop device.
+#
+# Setup:
+#   limactl shell k3s -- sudo bash -c "
+#     dd if=/dev/zero of=/tmp/test-block.img bs=1M count=1200
+#     losetup /dev/loop0 /tmp/test-block.img
+#   "
+#
+# Then apply this file:
+#   kubectl apply -f test-resources.yaml
+
+---
+# StorageClass for static loop-device provisioning.
+# kubernetes.io/no-provisioner means PVs must be created manually and
+# binding is handled by Kubernetes' PV controller (no external provisioner).
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: loop-backing
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: Immediate
+
+---
+# Manually provisioned PV backed by the loop device inside the Lima VM.
+# storageClassName: loop-backing so controller-created backing PVCs bind here.
+# Label 'loop-device: "0"' lets PVCs use a labelSelector for deterministic binding.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: luks-loop-pv
+  labels:
+    loop-device: "0"
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadWriteOnce]
+  volumeMode: Block          # raw block device — required for LUKS
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: loop-backing
+  local:
+    path: /dev/loop0
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: Exists
+
+---
+# StorageClass that ties the LUKS CSI driver to the loop-backing storage.
+# Use this instead of the generic luks-encrypted for loop-device testing.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: luks-encrypted-loop
+provisioner: luks.csi.example.com
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+parameters:
+  backingStorageClass: loop-backing
+  luksType: luks2
+  filesystem: ext4
+  csi.storage.k8s.io/node-stage-secret-name: "${pvc.name}-luks-key"
+  csi.storage.k8s.io/node-stage-secret-namespace: "${pvc.namespace}"
+
+---
+# Encryption key Secret — user-managed.
+# Name follows the convention: <pvc-name>-luks-key
+apiVersion: v1
+kind: Secret
+metadata:
+  name: test-pvc-luks-key
+  namespace: default
+stringData:
+  luksKey: "my-test-passphrase-change-me"
+
+---
+# PVC that requests an encrypted volume via our CSI driver.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-pvc
+  namespace: default
+spec:
+  storageClassName: luks-encrypted-loop
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+# Test pod that mounts the encrypted volume
+apiVersion: v1
+kind: Pod
+metadata:
+  name: luks-test-pod
+  namespace: default
+spec:
+  containers:
+    - name: app
+      image: alpine:3.19
+      command: [sh, -c, "echo 'hello from luks' > /mnt/data/test.txt && cat /mnt/data/test.txt && sleep 3600"]
+      volumeMounts:
+        - name: encrypted-vol
+          mountPath: /mnt/data
+  volumes:
+    - name: encrypted-vol
+      persistentVolumeClaim:
+        claimName: test-pvc

@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: luks-csi-node
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: luks-csi-node
+  template:
+    metadata:
+      labels:
+        app: luks-csi-node
+      annotations:
+        # AppArmor restricts the privileged container to LUKS/mount operations only.
+        # The profile must be loaded on each node first (see manifests/apparmor-profile.yaml).
+        container.apparmor.security.beta.kubernetes.io/luks-csi: localhost/k8s-luks-restricted
+    spec:
+      serviceAccountName: luks-csi-node
+      containers:
+        # Our driver (node mode)
+        - name: luks-csi
+          image: luks-csi:dev
+          imagePullPolicy: Never   # change to IfNotPresent/Always for registry images
+          securityContext:
+            privileged: true   # required for cryptsetup / dm-crypt / mount
+          env:
+            - name: CSI_ENDPOINT
+              value: /csi/csi.sock
+            - name: CSI_MODE
+              value: node
+            # Disable udev synchronisation in cryptsetup to prevent hangs in
+            # container environments where udev is not running.
+            - name: CRYPTSETUP_UDEV_SYNC_DISABLE
+              value: "1"
+            - name: VAULT_ADDR
+              value: "http://vault.default.svc.cluster.local:8200"
+            - name: VAULT_ROLE
+              value: "luks-operator-role"
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            # Kubelet pod volumes dir — bind mounts made here must be visible
+            # on the host, hence Bidirectional propagation.
+            - name: pods-mount-dir
+              mountPath: /var/lib/kubelet/pods
+              mountPropagation: Bidirectional
+            # Host block devices for cryptsetup
+            - name: dev-dir
+              mountPath: /dev
+
+        # Sidecar: registers our plugin socket with kubelet so kubelet knows
+        # where to send NodeStageVolume / NodePublishVolume calls.
+        - name: node-driver-registrar
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.12.0
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/luks.csi.example.com/csi.sock
+            - --v=5
+          lifecycle:
+            preStop:
+              exec:
+                # Clean up the registration socket on pod shutdown
+                command: [/bin/sh, -c, "rm -f /registration/luks.csi.example.com-reg.sock"]
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+
+      volumes:
+        # Shared between luks-csi and node-driver-registrar
+        - name: plugin-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/luks.csi.example.com
+            type: DirectoryOrCreate
+        # kubelet watches this dir for new driver registrations
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: Directory
+        - name: pods-mount-dir
+          hostPath:
+            path: /var/lib/kubelet/pods
+            type: Directory
+        - name: dev-dir
+          hostPath:
+            path: /dev
+            type: Directory

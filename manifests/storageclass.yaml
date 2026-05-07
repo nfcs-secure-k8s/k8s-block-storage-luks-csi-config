@@ -1,0 +1,26 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: luks-encrypted
+provisioner: luks.csi.example.com
+reclaimPolicy: Delete
+# Immediate: our CreateVolume provisions the backing PVC synchronously.
+# WaitForFirstConsumer is not yet supported for the backing StorageClass.
+volumeBindingMode: Immediate
+parameters:
+  # StorageClass that will provision the underlying raw block volume.
+  # Change this to match the block StorageClass available in your cluster.
+  backingStorageClass: local-path
+
+  # LUKS encryption parameters
+  luksType: luks2
+  filesystem: ext4
+
+  # Tenant/institution identifier used to namespace LUKS keys in Vault.
+  # Keys are stored at: secret/tenants/<institution>/luks-keys/<volume-name>
+  institution: "default"
+
+  # What to do when the PVC (and thus volume) is deleted:
+  #   Delete — destroy the Vault key (all versions) and the backing PVC.
+  #   Retain — keep the Vault key and backing PVC for manual recovery.
+  deletionPolicy: "Delete"

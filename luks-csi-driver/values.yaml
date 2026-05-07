@@ -1,0 +1,69 @@
+# -- Override the chart name used in resource names and labels.
+nameOverride: ""
+# -- Override the full release name used in resource names.
+fullnameOverride: ""
+
+# -- Kubernetes namespace for all chart resources.
+namespace: kube-system
+
+# -- CSI driver name. Must match the provisioner field in the StorageClass.
+driverName: luks.csi.example.com
+
+# Driver container image
+image:
+  repository: luks-csi
+  tag: dev
+  # -- Set to IfNotPresent or Always when using a registry.
+  pullPolicy: Never
+
+# -- Image pull secrets for the driver container (e.g. a private registry).
+imagePullSecrets: []
+# - name: my-registry-secret
+
+# Kubernetes CSI sidecar images
+sidecars:
+  provisioner:
+    image: registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
+  nodeDriverRegistrar:
+    image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.12.0
+
+# Controller Deployment settings
+controller:
+  replicaCount: 1
+
+# HashiCorp Vault connection settings
+vault:
+  # -- Vault API address reachable from within the cluster.
+  address: "http://vault.default.svc.cluster.local:8200"
+  # -- Vault Kubernetes auth role for both the controller and node service accounts.
+  role: "luks-operator-role"
+  # -- KV v2 mount point where LUKS keys are stored.
+  mount: "secret"
+  # -- How often (seconds) the controller polls Vault versions and annotates PVs.
+  syncInterval: 30
+
+# StorageClass settings
+storageClass:
+  # -- Set to false to skip StorageClass creation (e.g. if you manage it separately).
+  enabled: true
+  name: luks-encrypted
+  # -- StorageClass that provisions the underlying raw block volume.
+  backingStorageClass: local-path
+  # -- Tenant/institution — used to namespace LUKS keys in Vault at
+  # secret/tenants/<institution>/luks-keys/<volume-name>.
+  institution: "default"
+  # -- Delete: destroy Vault key + backing PVC on volume deletion.
+  # Retain: keep both for manual recovery.
+  deletionPolicy: "Delete"
+  luksType: luks2
+  filesystem: ext4
+
+# AppArmor profile loader
+apparmor:
+  # -- Set to false to skip the AppArmor ConfigMap and loader DaemonSet.
+  # The AppArmor annotation on the node DaemonSet will still be present;
+  # disable it separately if your nodes don't support AppArmor.
+  enabled: true
+  # -- Set to false to remove the AppArmor annotation from the node pod spec.
+  # Useful when testing on nodes where the profile has not been loaded yet.
+  annotate: true

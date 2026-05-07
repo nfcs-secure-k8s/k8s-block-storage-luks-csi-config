@@ -1,0 +1,4 @@
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+kubernetes>=29.0.0
+hvac>=2.3.0

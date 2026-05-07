@@ -1,0 +1,87 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: luks-csi-controller
+  namespace: kube-system
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: luks-csi-node
+  namespace: kube-system
+
+---
+# Controller ClusterRole — includes permissions required by external-provisioner
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: luks-csi-controller
+rules:
+  # PV/PVC management (our driver + external-provisioner).
+  # patch on persistentvolumes is also used by the Vault sync thread to
+  # annotate PVs with the current Vault key version.
+  - apiGroups: [""]
+    resources: [persistentvolumes]
+    verbs: [get, list, watch, create, delete, patch]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses]
+    verbs: [get, list, watch]
+  - apiGroups: [storage.k8s.io]
+    resources: [csinodes]
+    verbs: [get, list, watch]
+  # Events
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch, update]
+  # Leader election (external-provisioner uses Leases)
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: luks-csi-controller
+subjects:
+  - kind: ServiceAccount
+    name: luks-csi-controller
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: luks-csi-controller
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Node ClusterRole — LUKS keys are now fetched from Vault directly by the
+# node container (no K8s Secret access needed). PVs are read for device info.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: luks-csi-node
+rules:
+  - apiGroups: [""]
+    resources: [persistentvolumes]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: luks-csi-node
+subjects:
+  - kind: ServiceAccount
+    name: luks-csi-node
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: luks-csi-node
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,15 @@
+apiVersion: v2
+name: luks-csi-driver
+description: CSI driver for LUKS-encrypted block storage with HashiCorp Vault key management
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - luks
+  - csi
+  - encryption
+  - vault
+sources:
+  - https://github.com/nfcs-secure-k8s/k8s-block-storage-luks-operator-config
+maintainers:
+  - name: nfcs-secure-k8s

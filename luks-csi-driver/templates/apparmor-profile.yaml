@@ -1,0 +1,147 @@
+{{- if .Values.apparmor.enabled }}
+---
+# ConfigMap holding the AppArmor profile content.
+# The loader DaemonSet below writes this to /etc/apparmor.d/ on every node
+# and calls apparmor_parser to activate it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "luks-csi-driver.fullname" . }}-apparmor
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "luks-csi-driver.labels" . | nindent 4 }}
+data:
+  k8s-luks-restricted: |
+    include <tunables/global>
+
+    profile k8s-luks-restricted flags=(attach_disconnected) {
+      include <abstractions/base>
+      include <abstractions/nameservice>
+
+      /bin/sh ix,
+      /bin/busybox ix,
+      /sbin/apk ix,
+      /{usr/,}sbin/cryptsetup ix,
+      /{usr/,}bin/nsenter ix,
+      /{usr/,}bin/lsblk ix,
+      /{usr/,}bin/findmnt ix,
+      /{usr/,}sbin/dmsetup ix,
+      /{usr/,}bin/fuser ix,
+      /{usr/,}bin/umount ix,
+      /{usr/,}bin/mount ix,
+      /{usr/,}bin/tr ix,
+      /{usr/,}bin/awk ix,
+      /{usr/,}bin/grep ix,
+      /{usr/,}bin/sleep ix,
+      /{usr/,}bin/mkdir ix,
+      /{usr/,}sbin/mkfs.ext4 ix,
+      /{usr/,}sbin/mke2fs ix,
+      /{usr/,}bin/chown ix,
+      /{usr/,}bin/chmod ix,
+
+      capability chown,
+      capability fowner,
+      capability fsetid,
+      capability dac_override,
+      capability dac_read_search,
+      capability sys_chroot,
+      capability sys_admin,
+      capability sys_resource,
+      capability ipc_lock,
+      capability sys_ptrace,
+      capability sys_nice,
+      capability mknod,
+
+      ptrace (read, trace) peer=unconfined,
+      network alg,
+      network unix,
+
+      /dev/vd* rwmk,
+      /dev/sd* rwmk,
+      /dev/dm-* rwmk,
+      /dev/mapper/* rwmk,
+      /dev/mapper/control rwmk,
+      /dev/loop* rwmk,
+      /dev/urandom r,
+      /dev/random r,
+
+      / r,
+      /etc/mke2fs.conf r,
+      /etc/ssl/openssl.cnf r,
+      /proc/crypto r,
+      /proc/devices r,
+      @{PROC}/self/mountinfo r,
+      @{PROC}/[0-9]*/mountinfo r,
+      /sys/dev/block/** r,
+      /sys/devices/** r,
+      /sys/block/** r,
+      /sys/fs/ r,
+
+      /run/ r,
+      /run/mount/ rw,
+      /run/mount/** rw,
+      /run/cryptsetup/ rwk,
+      /run/cryptsetup/** rwk,
+
+      /var/lib/kubelet/** rw,
+
+      mount fstype=ext4,
+      mount fstype=xfs,
+      umount,
+
+      deny /etc/shadow w,
+      deny /root/** w,
+      deny /sys/firmware/** rw,
+    }
+---
+# DaemonSet that loads the AppArmor profile on every node at startup.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "luks-csi-driver.fullname" . }}-apparmor-loader
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "luks-csi-driver.labels" . | nindent 4 }}
+    app.kubernetes.io/component: apparmor-loader
+spec:
+  selector:
+    matchLabels:
+      {{- include "luks-csi-driver.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: apparmor-loader
+  template:
+    metadata:
+      labels:
+        {{- include "luks-csi-driver.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: apparmor-loader
+    spec:
+      hostPID: true
+      initContainers:
+        - name: apparmor-loader
+          image: ubuntu:22.04
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              cp /profiles/k8s-luks-restricted /etc/apparmor.d/k8s-luks-restricted
+              apparmor_parser -r /etc/apparmor.d/k8s-luks-restricted
+              echo "AppArmor profile k8s-luks-restricted loaded."
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: profile
+              mountPath: /profiles
+            - name: apparmor-d
+              mountPath: /etc/apparmor.d
+      containers:
+        - name: pause
+          image: gcr.io/google_containers/pause:3.1
+      volumes:
+        - name: profile
+          configMap:
+            name: {{ include "luks-csi-driver.fullname" . }}-apparmor
+        - name: apparmor-d
+          hostPath:
+            path: /etc/apparmor.d
+            type: DirectoryOrCreate
+{{- end }}
