@@ -42,10 +42,17 @@ spec:
             # container environments where udev is not running.
             - name: CRYPTSETUP_UDEV_SYNC_DISABLE
               value: "1"
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
             {{- include "luks-csi-driver.vaultEnv" . | nindent 12 }}
           volumeMounts:
             - name: plugin-dir
               mountPath: /csi
+            - name: staging-dir
+              mountPath: /var/lib/kubelet/plugins/kubernetes.io/csi
+              mountPropagation: Bidirectional
             - name: pods-mount-dir
               mountPath: /var/lib/kubelet/pods
               mountPropagation: Bidirectional
@@ -77,6 +84,10 @@ spec:
           hostPath:
             path: /var/lib/kubelet/plugins_registry
             type: Directory
+        - name: staging-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/kubernetes.io/csi
+            type: DirectoryOrCreate
         - name: pods-mount-dir
           hostPath:
             path: /var/lib/kubelet/pods

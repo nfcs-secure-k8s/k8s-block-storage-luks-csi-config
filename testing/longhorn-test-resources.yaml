@@ -1,0 +1,54 @@
+---
+# StorageClass that ties the LUKS CSI driver to Longhorn.
+# Longhorn must be installed and ready before applying this file.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: luks-encrypted-longhorn
+provisioner: luks.csi.example.com
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+parameters:
+  backingStorageClass: longhorn
+  luksType: luks2
+  filesystem: ext4
+
+---
+# PVC that requests an encrypted volume via our CSI driver (Longhorn-backed).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: longhorn-test-pvc
+  namespace: default
+spec:
+  storageClassName: luks-encrypted-longhorn
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+# Test pod that writes a file to the encrypted mount and then sleeps.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: luks-longhorn-test-pod
+  namespace: default
+spec:
+  containers:
+    - name: app
+      image: alpine:3.19
+      command:
+        - sh
+        - -c
+        - |
+          echo 'hello from luks+longhorn' > /mnt/data/test.txt
+          cat /mnt/data/test.txt
+          sleep 3600
+      volumeMounts:
+        - name: encrypted-vol
+          mountPath: /mnt/data
+  volumes:
+    - name: encrypted-vol
+      persistentVolumeClaim:
+        claimName: longhorn-test-pvc

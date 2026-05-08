@@ -16,7 +16,7 @@ COPY proto/ proto/
 COPY generate_proto.sh .
 RUN bash generate_proto.sh
 
-COPY driver.py controller.py node.py luks.py k8s.py main.py ./
+COPY driver.py controller.py node.py luks.py k8s.py vault.py device.py main.py ./
 
 ENV CSI_ENDPOINT=/csi/csi.sock
 ENV CSI_MODE=all

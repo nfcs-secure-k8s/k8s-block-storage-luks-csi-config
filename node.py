@@ -23,6 +23,10 @@ import vault as vault_mod
 
 LOG = logging.getLogger(__name__)
 
+# Kubelet injects the real Kubernetes node name via the downward API.
+# Fall back to gethostname() only for local 'all' mode testing.
+_NODE_NAME = os.environ.get("NODE_NAME") or socket.gethostname()
+
 
 def _mapper_name(volume_id: str) -> str:
     """Deterministic dm-crypt mapper name derived from volume ID."""
@@ -138,7 +142,7 @@ class NodeServicer(csi_pb2_grpc.NodeServicer):
                 raise ValueError("volume_context.backingPvName is required")
 
             block_device = device.attach_and_resolve(
-                volume_id, pv_name, socket.gethostname()
+                volume_id, pv_name, _NODE_NAME
             )
 
             LOG.info(
@@ -189,7 +193,7 @@ class NodeServicer(csi_pb2_grpc.NodeServicer):
             luks.luks_close_robust(mapper)
             # Release the VolumeAttachment so the backing CSI driver can detach
             # the raw block device.  No-op for local/hostPath volumes.
-            device.release_attachment(volume_id, socket.gethostname())
+            device.release_attachment(volume_id, _NODE_NAME)
         except Exception as e:
             LOG.exception("NodeUnstageVolume failed")
             context.set_code(grpc.StatusCode.INTERNAL)
@@ -257,4 +261,4 @@ class NodeServicer(csi_pb2_grpc.NodeServicer):
         )
 
     def NodeGetInfo(self, request, context):
-        return csi_pb2.NodeGetInfoResponse(node_id=socket.gethostname())
+        return csi_pb2.NodeGetInfoResponse(node_id=_NODE_NAME)
