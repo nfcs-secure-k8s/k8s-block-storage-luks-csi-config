@@ -36,7 +36,7 @@ vault:
   # -- Vault API address reachable from within the cluster.
   address: "http://vault.default.svc.cluster.local:8200"
   # -- Vault Kubernetes auth role for both the controller and node service accounts.
-  role: "luks-operator-role"
+  role: "luks-csi-role"
   # -- KV v2 mount point where LUKS keys are stored.
   mount: "secret"
   # -- How often (seconds) the controller polls Vault versions and annotates PVs.

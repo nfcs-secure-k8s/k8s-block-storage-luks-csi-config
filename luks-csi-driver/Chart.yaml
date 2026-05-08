@@ -10,6 +10,8 @@ keywords:
   - encryption
   - vault
 sources:
-  - https://github.com/nfcs-secure-k8s/k8s-block-storage-luks-operator-config
+  - https://github.com/nfcs-secure-k8s/k8s-block-storage-luks-csi-config
 maintainers:
   - name: nfcs-secure-k8s
+annotations:
+  org.opencontainers.image.source: "https://github.com/nfcs-secure-k8s/k8s-block-storage-luks-csi-config"
