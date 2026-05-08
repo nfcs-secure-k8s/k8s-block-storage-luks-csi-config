@@ -7,9 +7,9 @@ CreateVolume:
   3. Wait for the PVC to reach Bound.
   4. Read the backing PV to determine the raw block device path.
   5. Auto-generate a LUKS key in Vault (idempotent) for this volume.
-  6. Return a Volume whose volume_context carries backingDevice, luksType,
+  6. Return a Volume whose volume_context carries backingPvName, luksType,
      filesystem, backingPvcName, backingPvcNamespace, institution, vaultPath,
-     and deletionPolicy so NodeStageVolume can fetch the key from Vault.
+     and deletionPolicy so NodeStageVolume can resolve the device and key.
 
 DeleteVolume:
   Parse namespace and PVC name from volume ID, then:
@@ -45,17 +45,6 @@ def _backing_pvc_name(volume_name: str) -> str:
     raw = _PVC_PREFIX + volume_name.lower().replace("_", "-")
     return raw[:_PVC_NAME_MAX].rstrip("-")
 
-
-def _device_from_pv(pv) -> str | None:
-    """Extract the raw block device path from a PV spec (best-effort)."""
-    spec = pv.spec
-    local = getattr(spec, "local", None)
-    if local and getattr(local, "path", None):
-        return local.path
-    host_path = getattr(spec, "host_path", None)
-    if host_path and getattr(host_path, "path", None):
-        return host_path.path
-    return None
 
 
 class ControllerServicer(csi_pb2_grpc.ControllerServicer):
@@ -97,10 +86,6 @@ class ControllerServicer(csi_pb2_grpc.ControllerServicer):
             k8s.create_pvc(pvc_name, namespace, backing_sc, size_str)
             pv_name = k8s.wait_for_pvc_bound(pvc_name, namespace)
 
-            api = k8s.core()
-            pv = api.read_persistent_volume(pv_name)
-            device = _device_from_pv(pv)
-
             # Auto-generate LUKS key in Vault (no-op if already exists).
             # We use the CSI volume name (not the PVC name) as the Vault key
             # identifier so it stays stable across renames.
@@ -120,8 +105,6 @@ class ControllerServicer(csi_pb2_grpc.ControllerServicer):
                 "vaultPath": vault_path,
                 "deletionPolicy": deletion_policy,
             }
-            if device:
-                volume_context["backingDevice"] = device
 
             user_pvc_name = params.get("csi.storage.k8s.io/pvc-name")
             if user_pvc_name:

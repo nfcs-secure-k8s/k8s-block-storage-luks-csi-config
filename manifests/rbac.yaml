@@ -58,8 +58,9 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 
 ---
-# Node ClusterRole — LUKS keys are now fetched from Vault directly by the
-# node container (no K8s Secret access needed). PVs are read for device info.
+# Node ClusterRole — LUKS keys are fetched from Vault directly (no K8s Secret
+# access needed). PVs are read to resolve device paths. VolumeAttachments are
+# created/deleted to trigger attach/detach on the backing CSI driver.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -71,6 +72,9 @@ rules:
   - apiGroups: [""]
     resources: [nodes]
     verbs: [get, list, watch]
+  - apiGroups: [storage.k8s.io]
+    resources: [volumeattachments]
+    verbs: [get, list, watch, create, delete]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1

@@ -38,6 +38,10 @@ def core() -> client.CoreV1Api:
     return client.CoreV1Api(api_client=_api_client())
 
 
+def storage() -> client.StorageV1Api:
+    return client.StorageV1Api(api_client=_api_client())
+
+
 # ---------------------------------------------------------------------------
 # PVC helpers
 # ---------------------------------------------------------------------------

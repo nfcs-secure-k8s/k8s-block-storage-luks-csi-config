@@ -18,12 +18,21 @@ User PVC (storageClassName: luks-encrypted)
         ▼
   Controller plugin (Deployment)
   ├── creates a backing PVC against the configured backingStorageClass
-  └── waits for it to Bind → returns VolumeContext (device path, LUKS params)
+  ├── waits for it to Bind → records backingPvName in VolumeContext
+  └── auto-generates LUKS key in Vault (idempotent)
         │
         │  kubelet calls NodeStageVolume on the node where the pod is scheduled
         ▼
   Node plugin (DaemonSet, privileged)
   ├── NodeStageVolume:
+  │     creates a VolumeAttachment → triggers backing CSI driver to attach
+  │     the raw block device to this node (Cinder, Ceph, Longhorn, EBS, etc.)
+  │     resolves the device path via the RESOLVERS registry:
+  │       LocalResolver      → /dev/<path> (local / hostPath)
+  │       LonghornResolver   → /dev/longhorn/<volumeHandle>
+  │       CephRBDResolver    → /dev/rbd/<pool>/<image>
+  │       ByIdResolver       → scan /dev/disk/by-id/ (Cinder, EBS, GCE, …)
+  │     fetches LUKS key from Vault
   │     cryptsetup isLuks  → luksFormat (first use only)
   │     cryptsetup luksOpen → /dev/mapper/luks-<id>
   │     mkfs.<fs>           (first use only)
@@ -32,6 +41,7 @@ User PVC (storageClassName: luks-encrypted)
   │     bind-mount staging path → pod-specific path
   ├── NodeUnpublishVolume: umount pod path
   └── NodeUnstageVolume:  cryptsetup luksClose
+                          delete VolumeAttachment → backing driver detaches
 ```
 
 When a PVC is created, the Controller plugin auto-generates a cryptographically secure
@@ -40,6 +50,8 @@ LUKS key in HashiCorp Vault at `secret/tenants/{institution}/luks-keys/{volume-n
 the key directly from Vault using the pod's Kubernetes service account JWT. Users do not
 create or manage key material. The only prerequisite is a running Vault instance with the
 Kubernetes auth method configured — see [Vault prerequisites](#vault-prerequisites) below.
+
+For architecture and sequence diagrams see [architecture.md](architecture.md).
 
 ---
 
@@ -51,11 +63,16 @@ csi-driver/
 ├── driver.py             # Identity service (GetPluginInfo, Probe)
 ├── controller.py         # Controller service (CreateVolume / DeleteVolume)
 ├── node.py               # Node service (NodeStageVolume, NodePublishVolume, ...)
+├── device.py             # Device resolution and attachment:
+│                         #   extensible RESOLVERS registry (Longhorn, Ceph, ByIdResolver, …)
+│                         #   attach_and_resolve() — VolumeAttachment lifecycle + device wait
 ├── luks.py               # cryptsetup and mkfs subprocess wrappers
-├── k8s.py                # Kubernetes API helpers (PVC lifecycle, Secret reads)
+├── vault.py              # HashiCorp Vault KV v2 client (ensure/read/delete key, rotation)
+├── k8s.py                # Kubernetes API helpers (PVC/PV/Event/VolumeAttachment)
 ├── requirements.txt
 ├── Dockerfile
 ├── generate_proto.sh     # Generates Python gRPC stubs from csi.proto
+├── architecture.md       # Architecture diagram (Mermaid)
 ├── SECURITY.md           # Security review and known issues for sensitive data workloads
 ├── proto/
 │   └── csi.proto         # CSI spec v1 (from container-storage-interface/spec)
@@ -85,8 +102,7 @@ csi-driver/
 **Cluster requirements:**
 
 - Kubernetes 1.28+ (k3s, RKE2, GKE, EKS, AKS, etc.)
-- A block-mode StorageClass (e.g. Ceph RBD, OpenStack Cinder, AWS EBS in block mode,
-  or a local/loop device for testing)
+- A block-mode StorageClass — see [Supported backing storage](#supported-backing-storage) below
 - CSI sidecar images accessible from the cluster
   (`registry.k8s.io/sig-storage/csi-provisioner:v5.1.0` and
   `registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.12.0`)
@@ -106,6 +122,29 @@ See [Vault prerequisites](#vault-prerequisites) for the exact setup commands.
 
 - [Lima](https://lima-vm.io/) 2.0+ — `brew install lima`
 - A running k3s Lima VM (see [Local development with Lima](#local-development-with-lima) below)
+
+---
+
+## Supported backing storage
+
+The driver works with any block-mode StorageClass. At `NodeStageVolume` time it
+creates a `VolumeAttachment` to trigger the backing CSI driver's attach flow, then
+resolves the on-node device path via an ordered **RESOLVERS** registry:
+
+| Resolver | Backing driver | Device path |
+|---|---|---|
+| `LocalResolver` | local / hostPath static PVs | path from PV spec |
+| `LonghornResolver` | `driver.longhorn.io` | `/dev/longhorn/<volumeHandle>` |
+| `CephRBDResolver` | `rbd.csi.ceph.com` / rook-ceph | `/dev/rbd/<pool>/<imageName>` |
+| `ByIdResolver` *(fallback)* | Cinder, EBS, GCE PD, Azure Disk, … | scan `/dev/disk/by-id/` for handle |
+
+`local` and `hostPath` PVs skip the VolumeAttachment step entirely (the device is always
+present). For all CSI-backed storage, the driver holds the `VolumeAttachment` open for the
+lifetime of the mount and deletes it during `NodeUnstageVolume` so the backing driver
+cleanly detaches the block device.
+
+**Adding a new provider** — subclass `Resolver` in `device.py` and insert it into
+`RESOLVERS` before `ByIdResolver`. No other changes are needed.
 
 ---
 
@@ -468,12 +507,12 @@ and uses the [kopf](https://github.com/nolar/kopf) framework with a custom `Encr
 | **Key rotation trigger** | 30s timer detects Vault version bump → patches `vaultVersion` annotation | 30s sync thread annotates PV; rotation auto-applied in `NodeStageVolume` |
 | **Rotation mechanism** | Privileged rekey Job: `luksAddKey` + `luksRemoveKey` | `_open_with_rotation()` in `node.py`: `luksAddKey` + `luksRemoveKey` |
 | **AppArmor deployment** | SSH script (`scripts/k8s-luks-restricted.sh`) run on each worker | Loader DaemonSet (`apparmor-profile.yaml`) — automatic, no SSH required |
-| **Device path** | Hard-coded `/dev/vdc` in pod shell script | Derived from the backing PV's spec; passed via VolumeContext |
+| **Device path** | Hard-coded `/dev/vdc` in pod shell script | Resolved at node time via extensible RESOLVERS registry; VolumeAttachment triggers backing driver attach/detach |
 | **Encryption setup** | init container inside every workload pod (installs cryptsetup at runtime) | Node plugin runs once per volume on the node; no changes to user pods |
 | **Privileged pods** | Every user workload pod needs `privileged: true` | Only the node DaemonSet is privileged; user pods are unprivileged |
 | **Lifecycle management** | No delete handler; LUKS device left open on pod exit | `NodeUnstageVolume` calls `cryptsetup luksClose`; clean unmount on pod deletion |
 | **Multi-pod attach** | Not handled | CSI capabilities enforce RWO; kubelet manages attach/detach |
-| **Backend portability** | Tied to OpenStack Cinder (`/dev/vdc` path assumption) | Works with any block StorageClass via `backingStorageClass` parameter |
+| **Backend portability** | Tied to OpenStack Cinder (`/dev/vdc` path assumption) | Works with any block StorageClass; built-in support for Longhorn, Ceph RBD, Cinder, EBS, GCE PD, Azure Disk, and local/hostPath |
 | **Kubernetes integration** | Operator must be running for volumes to work | Standard CSI; volumes work independently of the operator process |
 | **Observability** | kopf events + custom status fields | Standard PVC/PV events; `kubectl describe pvc` shows provisioning errors |
 

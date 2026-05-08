@@ -17,6 +17,7 @@ import subprocess
 import grpc
 
 from generated import csi_pb2, csi_pb2_grpc
+import device
 import luks
 import vault as vault_mod
 
@@ -57,6 +58,7 @@ def _umount_lazy(path: str) -> None:
     result = subprocess.run(["umount", "-fl", path], capture_output=True)
     if result.returncode != 0:
         raise RuntimeError(f"umount -fl failed: {result.stderr.decode().strip()}")
+
 
 
 def _open_with_rotation(device: str, mapper: str, institution: str, volume_name: str) -> None:
@@ -107,7 +109,9 @@ class NodeServicer(csi_pb2_grpc.NodeServicer):
         the device was last formatted/opened.
 
         Other volume_context keys:
-          backingDevice  — block device path (e.g. /dev/loop0, /dev/vdb)
+          backingPvName  — backing PV name; used to trigger attachment (via a
+                           VolumeAttachment for CSI drivers) and resolve the block
+                           device path through the device.RESOLVERS registry
           luksType       — luks1 or luks2 (default: luks2)
           filesystem     — ext4 or xfs   (default: ext4)
         """
@@ -120,37 +124,38 @@ class NodeServicer(csi_pb2_grpc.NodeServicer):
             context.set_details("volume_id is required")
             return csi_pb2.NodeStageVolumeResponse()
 
-        device = ctx.get("backingDevice")
-        if not device:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("volume_context.backingDevice is required")
-            return csi_pb2.NodeStageVolumeResponse()
-
         institution = ctx.get("institution", "default")
         vault_path = ctx.get("vaultPath", "")
-        # volume_name is the last segment of the Vault path
         volume_name = vault_path.rsplit("/", 1)[-1] if vault_path else volume_id.replace("/", "-")
 
         luks_type = ctx.get("luksType", "luks2")
         filesystem = ctx.get("filesystem", "ext4")
         mapper = _mapper_name(volume_id)
 
-        LOG.info(
-            "NodeStageVolume: volume=%s device=%s mapper=%s staging=%s vault=%s",
-            volume_id, device, mapper, staging_path, vault_path,
-        )
-
         try:
+            pv_name = ctx.get("backingPvName")
+            if not pv_name:
+                raise ValueError("volume_context.backingPvName is required")
+
+            block_device = device.attach_and_resolve(
+                volume_id, pv_name, socket.gethostname()
+            )
+
+            LOG.info(
+                "NodeStageVolume: volume=%s device=%s mapper=%s staging=%s vault=%s",
+                volume_id, block_device, mapper, staging_path, vault_path,
+            )
+
             current_key = vault_mod.read_secret(institution, volume_name).encode()
 
-            if not luks.is_luks(device):
-                LOG.info("Device %s is not LUKS-formatted; formatting now", device)
-                luks.luks_format(device, current_key, luks_type)
-                luks.luks_open(device, mapper, current_key)
+            if not luks.is_luks(block_device):
+                LOG.info("Device %s is not LUKS-formatted; formatting now", block_device)
+                luks.luks_format(block_device, current_key, luks_type)
+                luks.luks_open(block_device, mapper, current_key)
                 luks.make_filesystem(mapper, filesystem)
             else:
-                LOG.info("Device %s already LUKS-formatted; opening with rotation check", device)
-                _open_with_rotation(device, mapper, institution, volume_name)
+                LOG.info("Device %s already LUKS-formatted; opening with rotation check", block_device)
+                _open_with_rotation(block_device, mapper, institution, volume_name)
 
             os.makedirs(staging_path, exist_ok=True)
             if _is_mounted(staging_path):
@@ -182,6 +187,9 @@ class NodeServicer(csi_pb2_grpc.NodeServicer):
                 except RuntimeError:
                     _umount_lazy(staging_path)
             luks.luks_close_robust(mapper)
+            # Release the VolumeAttachment so the backing CSI driver can detach
+            # the raw block device.  No-op for local/hostPath volumes.
+            device.release_attachment(volume_id, socket.gethostname())
         except Exception as e:
             LOG.exception("NodeUnstageVolume failed")
             context.set_code(grpc.StatusCode.INTERNAL)
