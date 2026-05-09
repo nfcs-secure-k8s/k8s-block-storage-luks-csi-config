@@ -72,6 +72,7 @@ if [[ "${TEARDOWN}" == "true" ]]; then
 
   info "Removing Vault dev server ..."
   kubectl delete pod/vault svc/vault -n default --ignore-not-found
+  kubectl delete secret/vault-reviewer-token serviceaccount/vault -n default --ignore-not-found
   kubectl delete clusterrolebinding/vault-auth-delegator --ignore-not-found
 
   info "Uninstalling Longhorn ..."
@@ -137,6 +138,37 @@ if [[ "${SKIP_VAULT}" == "false" ]]; then
   if kubectl get pod/vault -n default &>/dev/null 2>&1; then
     info "Vault pod already exists — skipping Vault deploy (use --skip-vault to suppress this check)."
   else
+    # Create a dedicated ServiceAccount + long-lived token Secret for Vault.
+    # Projected SA tokens (the default pod mount) expire in ~1h and cannot be
+    # used as a stable token_reviewer_jwt in Vault's Kubernetes auth config.
+    info "Creating Vault service account and long-lived token ..."
+    kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault
+  namespace: default
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vault-reviewer-token
+  namespace: default
+  annotations:
+    kubernetes.io/service-account.name: vault
+type: kubernetes.io/service-account-token
+EOF
+
+    kubectl create clusterrolebinding vault-auth-delegator \
+      --clusterrole=system:auth-delegator \
+      --serviceaccount=default:vault \
+      --dry-run=client -o yaml | kubectl apply -f -
+
+    # Wait for the controller to populate the token into the Secret.
+    info "Waiting for vault reviewer token to be populated ..."
+    until kubectl get secret vault-reviewer-token -n default \
+        -o jsonpath='{.data.token}' 2>/dev/null | grep -q .; do sleep 2; done
+
     info "Deploying Vault dev server ..."
     kubectl apply -f - <<'EOF'
 apiVersion: v1
@@ -147,6 +179,7 @@ metadata:
   labels:
     app: vault
 spec:
+  serviceAccountName: vault
   containers:
     - name: vault
       image: hashicorp/vault:1.15
@@ -171,20 +204,16 @@ spec:
 EOF
     wait_for_pod vault default 60
 
-    info "Granting Vault pod permission to review tokens ..."
-    kubectl create clusterrolebinding vault-auth-delegator \
-      --clusterrole=system:auth-delegator \
-      --serviceaccount=default:default \
-      --dry-run=client -o yaml | kubectl apply -f -
-
     info "Configuring Vault Kubernetes auth ..."
+    REVIEWER_JWT=$(kubectl get secret vault-reviewer-token -n default \
+      -o jsonpath='{.data.token}' | base64 -d)
     kubectl exec vault -n default -- sh -c "
       export VAULT_TOKEN=root VAULT_ADDR=http://127.0.0.1:8200
       vault auth enable kubernetes
       vault write auth/kubernetes/config \
         kubernetes_host=https://kubernetes.default.svc:443 \
         kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
-        token_reviewer_jwt=@/var/run/secrets/kubernetes.io/serviceaccount/token
+        token_reviewer_jwt='${REVIEWER_JWT}'
       vault policy write luks-policy - <<POLICY
 path \"secret/data/tenants/*\"    { capabilities = [\"create\",\"read\",\"update\",\"delete\",\"list\"] }
 path \"secret/metadata/tenants/*\" { capabilities = [\"read\",\"list\",\"delete\"] }
