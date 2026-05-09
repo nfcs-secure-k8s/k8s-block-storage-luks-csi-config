@@ -204,12 +204,18 @@ spec:
 EOF
     wait_for_pod vault default 60
 
+    info "Waiting for Vault to be ready to serve requests ..."
+    until kubectl exec vault -n default -- sh -c \
+        'VAULT_ADDR=http://127.0.0.1:8200 vault status' &>/dev/null; do
+      sleep 2
+    done
+
     info "Configuring Vault Kubernetes auth ..."
     REVIEWER_JWT=$(kubectl get secret vault-reviewer-token -n default \
       -o jsonpath='{.data.token}' | base64 -d)
     kubectl exec vault -n default -- sh -c "
       export VAULT_TOKEN=root VAULT_ADDR=http://127.0.0.1:8200
-      vault auth enable kubernetes
+      vault auth enable kubernetes 2>/dev/null || true
       vault write auth/kubernetes/config \
         kubernetes_host=https://kubernetes.default.svc:443 \
         kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt \

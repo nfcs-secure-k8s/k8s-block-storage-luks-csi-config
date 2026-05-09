@@ -46,8 +46,10 @@ roleRef:
 
 ---
 # Node ClusterRole — LUKS keys are fetched from Vault directly (no secrets:get
-# needed). PVs are read to resolve device paths. VolumeAttachments are
-# created/deleted to trigger attach/detach on the backing CSI driver.
+# needed). PVs are read to resolve device paths. Staging pods are created in
+# the same namespace as the backing PVC to trigger the backing CSI driver's
+# NodeStageVolume so that the raw block device appears on the node before LUKS
+# open is attempted.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -61,8 +63,8 @@ rules:
   - apiGroups: [""]
     resources: [nodes]
     verbs: [get, list, watch]
-  - apiGroups: [storage.k8s.io]
-    resources: [volumeattachments]
+  - apiGroups: [""]
+    resources: [pods]
     verbs: [get, list, watch, create, delete]
 
 ---

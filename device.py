@@ -5,18 +5,24 @@ Architecture
 ------------
 Two concerns are handled here:
 
-1. Attachment  (ensure_attached / release_attachment)
-   For CSI-backed PVs, kubelet only asks the backing driver to attach a volume
-   when a pod that consumes it is scheduled.  Our backing PVC has no such pod,
-   so we create a VolumeAttachment object directly.  This triggers the backing
-   driver's ControllerPublishVolume and places the block device on the node.
-   The attachment is held open until NodeUnstageVolume calls release_attachment.
+1. Staging  (ensure_staged / release_staged)
+   For CSI-backed PVs, the backing driver's NodeStageVolume (which maps the
+   block device onto the node, e.g. rbd map for Ceph RBD) is only called by
+   kubelet when a pod that directly consumes the backing PVC is scheduled.
+   Our backing PVC has no such pod, so we create a short-lived "staging pod"
+   that mounts the backing PVC as a raw block device.  This triggers the full
+   kubelet CSI lifecycle — ControllerPublishVolume + NodeStageVolume — which
+   makes the block device appear on the node.  The pod is kept alive until
+   NodeUnstageVolume calls release_staged, at which point the device is no
+   longer needed.
+
+   For local/hostPath PVs ensure_staged is a no-op (device is always present).
 
 2. Device path resolution  (resolve_device_path / wait_for_device)
    Different storage backends expose the block device at different paths.
    Resolvers are tried in order; the first non-None result wins.
    ByIdResolver is the generic fallback for cloud-provider block storage and
-   runs after attachment is complete so the device is guaranteed to be present.
+   runs after staging is complete so the device is guaranteed to be present.
 
 Extending for a new storage provider
 -------------------------------------
@@ -31,10 +37,6 @@ Implement a Resolver subclass and insert it into RESOLVERS before ByIdResolver:
 
     # insert before the generic ByIdResolver fallback
     RESOLVERS.insert(RESOLVERS.index(_by_id_resolver), MyDriverResolver())
-
-If the VolumeAttachment approach does not work for a particular driver (e.g. it
-manages attachment out-of-band), override attach_and_resolve for that driver
-instead of patching the generic flow.
 """
 
 import hashlib
@@ -49,9 +51,12 @@ import k8s
 
 LOG = logging.getLogger(__name__)
 
-POLL_INTERVAL  = 3    # seconds between existence / status checks
-DEVICE_TIMEOUT = 120  # seconds to wait for device node to appear
-ATTACH_TIMEOUT = 120  # seconds to wait for VolumeAttachment.status.attached
+POLL_INTERVAL   = 3    # seconds between existence / status checks
+DEVICE_TIMEOUT  = 120  # seconds to wait for device node to appear
+STAGING_TIMEOUT = 300  # seconds to wait for the staging pod to be Running
+
+# Pause image used for the staging pod — no shell, minimal attack surface.
+_PAUSE_IMAGE = "registry.k8s.io/pause:3.9"
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +98,12 @@ class LonghornResolver(Resolver):
 class CephRBDResolver(Resolver):
     """
     Ceph RBD (rbd.csi.ceph.com / rook-ceph.rbd.csi.ceph.com).
-    Both kernel RBD and rbd-nbd create /dev/rbd/<pool>/<imageName>.
+
+    The kernel RBD module creates /dev/rbdX and exposes pool/image in sysfs
+    at /sys/bus/rbd/devices/<id>/.  The /dev/rbd/<pool>/<image> symlinks that
+    some docs reference are created by ceph-common udev rules, which are NOT
+    present on a k3s node that only has the rbd kernel module loaded.  We scan
+    sysfs instead, which works without any ceph userspace packages installed.
     """
 
     def resolve(self, pv) -> str | None:
@@ -103,9 +113,9 @@ class CephRBDResolver(Resolver):
         attrs = csi.volume_attributes or {}
         pool  = attrs.get("pool", "")
         image = attrs.get("imageName") or attrs.get("image", "")
-        if pool and image:
-            return f"/dev/rbd/{pool}/{image}"
-        return None
+        if not pool or not image:
+            return None
+        return _scan_rbd_sysfs(pool, image)
 
 
 class ByIdResolver(Resolver):
@@ -151,6 +161,31 @@ def _csi_spec(pv):
     return getattr(pv.spec, "csi", None)
 
 
+def _scan_rbd_sysfs(pool: str, image: str) -> str | None:
+    """
+    Find /dev/rbdX by scanning /sys/bus/rbd/devices/ for a matching pool+image.
+
+    The kernel RBD module populates one subdirectory per mapped image, named by
+    device index (0, 1, 2, ...).  Each directory has 'pool' and 'name' files.
+    The block device is /dev/rbd<index>.
+    """
+    sysfs = "/sys/bus/rbd/devices"
+    try:
+        indices = os.listdir(sysfs)
+    except OSError:
+        return None
+    for idx in indices:
+        base = os.path.join(sysfs, idx)
+        try:
+            dev_pool  = open(os.path.join(base, "pool")).read().strip()
+            dev_image = open(os.path.join(base, "name")).read().strip()
+        except OSError:
+            continue
+        if dev_pool == pool and dev_image == image:
+            return f"/dev/rbd{idx}"
+    return None
+
+
 def _scan_by_id(handle: str) -> str | None:
     """Return realpath of the first /dev/disk/by-id/ entry matching handle."""
     by_id = "/dev/disk/by-id"
@@ -170,13 +205,13 @@ def _scan_by_id(handle: str) -> str | None:
     return None
 
 
-def _attachment_name(volume_id: str, node_name: str) -> str:
-    """Stable, DNS-safe VolumeAttachment name derived from volume_id and node."""
-    raw = f"luks-attach-{volume_id.replace('/', '-')}-{node_name}"
-    if len(raw) <= 253:
+def _staging_pod_name(volume_id: str) -> str:
+    """Deterministic, DNS-safe pod name derived from volume_id."""
+    raw = f"luks-stage-{volume_id.replace('/', '-')}"
+    if len(raw) <= 63:
         return raw
     digest = hashlib.sha256(raw.encode()).hexdigest()[:16]
-    return f"luks-attach-{digest}"
+    return f"luks-stage-{digest}"
 
 
 # ---------------------------------------------------------------------------
@@ -206,104 +241,149 @@ def wait_for_device(path: str, timeout: int = DEVICE_TIMEOUT) -> None:
     raise TimeoutError(f"Device {path} did not appear within {timeout}s")
 
 
-def ensure_attached(volume_id: str, pv, node_name: str, timeout: int = ATTACH_TIMEOUT) -> None:
+def ensure_staged(
+    volume_id: str,
+    pv,
+    backing_pvc_name: str,
+    backing_pvc_namespace: str,
+    node_name: str,
+    timeout: int = STAGING_TIMEOUT,
+) -> None:
     """
-    Ensure the backing PV is attached to node_name.
+    Ensure the backing block device is present on node_name.
 
-    Creates a VolumeAttachment targeting the backing CSI driver and waits for
-    status.attached = True.  The attachment is held open until release_attachment
-    is called during NodeUnstageVolume.
+    For CSI-backed PVs this creates a pause pod that mounts the backing PVC as
+    a raw block device, pinned to node_name.  Kubelet's CSI machinery then calls
+    the backing driver's NodeStageVolume (e.g. rbd map for Ceph RBD), which makes
+    the block device appear on the node.  The pod remains until release_staged is
+    called from NodeUnstageVolume.
 
     No-op for non-CSI PVs (local, hostPath) where the device is always present.
     """
-    csi = _csi_spec(pv)
-    if not csi:
+    if not _csi_spec(pv):
         return
 
-    pv_name     = pv.metadata.name
-    attach_name = _attachment_name(volume_id, node_name)
-    api         = k8s.storage()
+    # The staging pod must be in the same namespace as the backing PVC —
+    # Kubernetes does not allow cross-namespace PVC references in pod specs.
+    ns = backing_pvc_namespace
+    pod_name = _staging_pod_name(volume_id)
+    core = k8s.core()
 
     try:
-        api.read_volume_attachment(attach_name)
-        LOG.info("VolumeAttachment %s already exists", attach_name)
+        core.read_namespaced_pod(pod_name, ns)
+        LOG.info("Staging pod %s/%s already exists", ns, pod_name)
     except client.exceptions.ApiException as e:
         if e.status != 404:
             raise
-        va = client.V1VolumeAttachment(
-            metadata=client.V1ObjectMeta(name=attach_name),
-            spec=client.V1VolumeAttachmentSpec(
-                attacher=csi.driver,
+        pod = client.V1Pod(
+            metadata=client.V1ObjectMeta(
+                name=pod_name,
+                namespace=ns,
+                labels={"app.kubernetes.io/managed-by": "luks-csi-driver"},
+            ),
+            spec=client.V1PodSpec(
                 node_name=node_name,
-                source=client.V1VolumeAttachmentSource(
-                    persistent_volume_name=pv_name,
-                ),
+                restart_policy="Never",
+                automount_service_account_token=False,
+                containers=[
+                    client.V1Container(
+                        name="pause",
+                        image=_PAUSE_IMAGE,
+                        volume_devices=[
+                            client.V1VolumeDevice(
+                                name="block-vol",
+                                device_path="/dev/xvda",
+                            )
+                        ],
+                    )
+                ],
+                volumes=[
+                    client.V1Volume(
+                        name="block-vol",
+                        persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
+                            claim_name=backing_pvc_name,
+                            read_only=False,
+                        ),
+                    )
+                ],
             ),
         )
-        api.create_volume_attachment(va)
+        core.create_namespaced_pod(ns, pod)
         LOG.info(
-            "Created VolumeAttachment %s (driver=%s node=%s pv=%s)",
-            attach_name, csi.driver, node_name, pv_name,
+            "Created staging pod %s/%s (node=%s pvc=%s)",
+            ns, pod_name, node_name, backing_pvc_name,
         )
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        va = api.read_volume_attachment(attach_name)
-        if va.status and va.status.attached:
-            LOG.info("VolumeAttachment %s reports attached", attach_name)
+        pod = core.read_namespaced_pod(pod_name, ns)
+        phase = pod.status.phase if pod.status else None
+        if phase == "Running":
+            LOG.info("Staging pod %s/%s is Running", ns, pod_name)
             return
-        if va.status and va.status.attach_error:
+        if phase in ("Failed", "Succeeded"):
             raise RuntimeError(
-                f"VolumeAttachment {attach_name} failed: "
-                f"{va.status.attach_error.message}"
+                f"Staging pod {ns}/{pod_name} entered phase {phase} unexpectedly"
             )
         LOG.info(
-            "Waiting for VolumeAttachment %s (%.0fs remaining)...",
-            attach_name, deadline - time.monotonic(),
+            "Waiting for staging pod %s/%s (phase=%s, %.0fs remaining)...",
+            ns, pod_name, phase, deadline - time.monotonic(),
         )
         time.sleep(POLL_INTERVAL)
     raise TimeoutError(
-        f"VolumeAttachment {attach_name} did not report attached within {timeout}s"
+        f"Staging pod {ns}/{pod_name} did not reach Running within {timeout}s"
     )
 
 
-def release_attachment(volume_id: str, node_name: str) -> None:
+def release_staged(volume_id: str) -> None:
     """
-    Delete the VolumeAttachment created by ensure_attached, triggering
-    ControllerUnpublishVolume on the backing CSI driver.
+    Delete the staging pod created by ensure_staged, allowing kubelet to call
+    the backing driver's NodeUnstageVolume and release the block device.
 
-    Safe to call when no attachment exists (e.g. local/hostPath volumes where
-    ensure_attached was a no-op).
+    Safe to call when no staging pod exists (e.g. local/hostPath volumes where
+    ensure_staged was a no-op).
+
+    The namespace is derived from volume_id, which this driver encodes as
+    "<namespace>/<pvc-name>" (set by controller.py).
     """
-    attach_name = _attachment_name(volume_id, node_name)
+    # volume_id format: "namespace/pvc-name"
+    ns = volume_id.split("/")[0] if "/" in volume_id else "default"
+    pod_name = _staging_pod_name(volume_id)
     try:
-        k8s.storage().delete_volume_attachment(attach_name)
-        LOG.info("Deleted VolumeAttachment %s", attach_name)
+        k8s.core().delete_namespaced_pod(
+            pod_name,
+            ns,
+            body=client.V1DeleteOptions(grace_period_seconds=0),
+        )
+        LOG.info("Deleted staging pod %s/%s", ns, pod_name)
     except client.exceptions.ApiException as e:
         if e.status != 404:
             raise
-        LOG.debug("VolumeAttachment %s already gone", attach_name)
+        LOG.debug("Staging pod %s/%s already gone", ns, pod_name)
 
 
 def attach_and_resolve(
     volume_id: str,
     pv_name: str,
+    backing_pvc_name: str,
+    backing_pvc_namespace: str,
     node_name: str,
-    attach_timeout: int = ATTACH_TIMEOUT,
+    staging_timeout: int = STAGING_TIMEOUT,
     device_timeout: int = DEVICE_TIMEOUT,
 ) -> str:
     """
     High-level helper used by NodeStageVolume.
 
     1. Fetch the backing PV.
-    2. Trigger and await VolumeAttachment (CSI drivers only).
+    2. Create a staging pod so kubelet triggers the backing driver's
+       NodeStageVolume (e.g. rbd map), making the block device appear.
     3. Resolve the device path via the RESOLVERS registry.
     4. Wait for the device file to appear on the node.
 
     Returns the block device path ready for cryptsetup.
     """
     pv = k8s.core().read_persistent_volume(pv_name)
-    ensure_attached(volume_id, pv, node_name, timeout=attach_timeout)
+    ensure_staged(volume_id, pv, backing_pvc_name, backing_pvc_namespace, node_name, timeout=staging_timeout)
     path = resolve_device_path(pv)
     if not path:
         raise ValueError(f"Cannot determine block device path from PV {pv_name!r}")

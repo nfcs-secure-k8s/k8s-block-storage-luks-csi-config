@@ -140,9 +140,11 @@ class NodeServicer(csi_pb2_grpc.NodeServicer):
             pv_name = ctx.get("backingPvName")
             if not pv_name:
                 raise ValueError("volume_context.backingPvName is required")
+            backing_pvc_name = ctx.get("backingPvcName", "")
+            backing_pvc_namespace = ctx.get("backingPvcNamespace", "")
 
             block_device = device.attach_and_resolve(
-                volume_id, pv_name, _NODE_NAME
+                volume_id, pv_name, backing_pvc_name, backing_pvc_namespace, _NODE_NAME
             )
 
             LOG.info(
@@ -191,9 +193,10 @@ class NodeServicer(csi_pb2_grpc.NodeServicer):
                 except RuntimeError:
                     _umount_lazy(staging_path)
             luks.luks_close_robust(mapper)
-            # Release the VolumeAttachment so the backing CSI driver can detach
-            # the raw block device.  No-op for local/hostPath volumes.
-            device.release_attachment(volume_id, _NODE_NAME)
+            # Delete the staging pod so kubelet calls the backing driver's
+            # NodeUnstageVolume and releases the block device.
+            # No-op for local/hostPath volumes (no staging pod was created).
+            device.release_staged(volume_id)
         except Exception as e:
             LOG.exception("NodeUnstageVolume failed")
             context.set_code(grpc.StatusCode.INTERNAL)

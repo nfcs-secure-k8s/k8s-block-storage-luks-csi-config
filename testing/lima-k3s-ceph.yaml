@@ -1,0 +1,156 @@
+# Lima VM template for k3s + Rook-Ceph single-node testing.
+#
+# This is a heavier VM than the base k3s template because Ceph requires
+# extra CPU, RAM, and a dedicated raw block device for the OSD.
+#
+# The OSD device is a loop device (/dev/loop10) backed by a sparse file on
+# the root disk — no additionalDisks needed. Lima mounts additionalDisks as
+# filesystems, which prevents Rook from claiming them as raw block devices.
+#
+# Setup (one-time):
+#   limactl start testing/lima-k3s-ceph.yaml --name k3s-ceph
+#
+# Usage:
+#   bash testing/test-ceph.sh
+
+minimumLimaVersion: 2.0.0
+
+# Rook-Ceph resource requirements for a single-node dev cluster:
+#   - operator + mon + mgr + OSD + crashcollector ≈ 10 pods
+#   - OSD alone needs ~1 GB RAM; mgr + mon add another ~500 MB each
+cpus: 6
+memory: "12GiB"
+# Root disk — 60 GiB: ~20 GiB for the OSD sparse file, rest for k3s + Rook images.
+disk: "60GiB"
+
+# containerd is managed by k3s.
+containerd:
+  system: false
+  user: false
+
+mounts: []
+
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -euxo pipefail
+
+      # ---------- k3s ----------
+      if [ ! -d /var/lib/rancher/k3s ]; then
+        # Disable Traefik and the local-path provisioner to save RAM.
+        # Rook provides its own storage; we don't need the built-in one.
+        # Port 6445 avoids conflicting with the base k3s VM on 6443.
+        curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server \
+          --write-kubeconfig-mode 644 \
+          --https-listen-port 6445 \
+          --disable traefik \
+          --disable local-storage" sh -
+      fi
+
+      # ---------- kernel modules required by Ceph CSI (rbd) ----------
+      modprobe rbd || true
+      # Persist across reboots.
+      echo rbd > /etc/modules-load.d/rbd.conf
+
+      # ---------- packages required by Rook ----------
+      # lvm2: Rook uses LVM for OSD management on some configurations.
+      # cryptsetup: needed by our LUKS CSI driver on the node.
+      MISSING=""
+      dpkg -s lvm2      &>/dev/null || MISSING="${MISSING} lvm2"
+      dpkg -s cryptsetup &>/dev/null || MISSING="${MISSING} cryptsetup"
+      if [[ -n "${MISSING}" ]]; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y --no-install-recommends ${MISSING}
+      fi
+
+      # ---------- OSD loop device ----------
+      # Lima mounts additionalDisks as filesystems, which Rook cannot claim.
+      # Instead we create a 20 GiB sparse file and attach it as /dev/loop10.
+      # A sparse file means it only occupies actual used blocks on the root disk.
+      OSD_IMG=/var/lib/ceph-osd.img
+      OSD_DEV=/dev/loop10
+
+      if [[ ! -f "${OSD_IMG}" ]]; then
+        truncate -s 20G "${OSD_IMG}"
+      fi
+
+      # Attach the loop device if not already set up (idempotent on reboot via systemd).
+      if ! losetup "${OSD_DEV}" &>/dev/null; then
+        losetup "${OSD_DEV}" "${OSD_IMG}"
+      fi
+
+      # Persist the loop device across reboots.
+      if [[ ! -f /etc/systemd/system/ceph-osd-loop.service ]]; then
+        cat > /etc/systemd/system/ceph-osd-loop.service <<'UNIT'
+      [Unit]
+      Description=Ceph OSD loop device (/dev/loop10)
+      After=local-fs.target
+      Before=k3s.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/sbin/losetup /dev/loop10 /var/lib/ceph-osd.img
+      ExecStop=/sbin/losetup -d /dev/loop10
+
+      [Install]
+      WantedBy=multi-user.target
+      UNIT
+        systemctl daemon-reload
+        systemctl enable ceph-osd-loop.service
+      fi
+
+probes:
+  - script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      if ! timeout 30s bash -c "until test -f /etc/rancher/k3s/k3s.yaml; do sleep 3; done"; then
+        echo >&2 "k3s is not running yet"
+        exit 1
+      fi
+      # Confirm the rbd module loaded — Rook CSI will fail without it.
+      if ! lsmod | grep -q '^rbd'; then
+        echo >&2 "rbd kernel module is not loaded"
+        exit 1
+      fi
+      # Confirm the OSD loop device is present.
+      if ! losetup /dev/loop10 &>/dev/null; then
+        echo >&2 "OSD loop device /dev/loop10 is not set up"
+        exit 1
+      fi
+    hint: |
+      Check k3s:       limactl shell k3s-ceph sudo journalctl -u k3s
+      Check rbd:       limactl shell k3s-ceph lsmod | grep rbd
+      Check loop dev:  limactl shell k3s-ceph sudo losetup /dev/loop10
+
+copyToHost:
+  - guest: "/etc/rancher/k3s/k3s.yaml"
+    host: "{{.Dir}}/copied-from-guest/kubeconfig.yaml"
+    deleteOnStop: true
+
+message: |
+  k3s-ceph VM is ready.
+  ------
+  export KUBECONFIG="{{.Dir}}/copied-from-guest/kubeconfig.yaml"
+  kubectl get nodes
+  ------
+  Run the Ceph test:
+    bash testing/test-ceph.sh
+  ------
+  OSD device inside VM: /dev/loop10 (backed by /var/lib/ceph-osd.img, 20 GiB sparse)
+
+images:
+  # Pinned release — same image series as the base k3s template.
+  - location: "https://cloud-images.ubuntu.com/releases/noble/release-20251213/ubuntu-24.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+    digest: "sha256:2b5f90ffe8180def601c021c874e55d8303e8bcbfc66fee2b94414f43ac5eb1f"
+  - location: "https://cloud-images.ubuntu.com/releases/noble/release-20251213/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+    digest: "sha256:a40713938d74aaec811f74cb1fa8bfcb535d22e26b2a0ca1cc90ad9db898feb9"
+  # Fallback to latest.
+  - location: "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+  - location: "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
