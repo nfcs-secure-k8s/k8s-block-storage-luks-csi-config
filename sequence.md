@@ -20,7 +20,7 @@ sequenceDiagram
         EP->>Ctrl: CreateVolume(name, params)
         Ctrl->>K8s: create backing PVC using backingStorageClass
         K8s-->>Ctrl: PVC Bound, pv_name returned
-        Ctrl->>Vault: ensure_secret(institution, volume_name)
+        Ctrl->>Vault: ensure_secret(vault_mount, vault_path, volume_name)
         Note right of Vault: Idempotent — skips if key already exists
         Vault-->>Ctrl: key version
         Ctrl-->>EP: Volume with volume_context backingPvName, vaultPath, luksType
@@ -49,7 +49,7 @@ sequenceDiagram
 
         Dev-->>Node: block device path
 
-        Node->>Vault: read_secret(institution, volume_name)
+        Node->>Vault: read_secret(vault_mount, vault_path, volume_name)
         Vault-->>Node: LUKS key + current version
 
         alt First use — device not yet LUKS-formatted
@@ -59,7 +59,7 @@ sequenceDiagram
         else Device already LUKS-formatted
             Node->>LUKS: luks_open(device, mapper, current_key)
             opt Vault version advanced — key rotation required
-                Node->>Vault: read_secret(institution, volume_name, version=prev)
+                Node->>Vault: read_secret(vault_mount, vault_path, volume_name, version=prev)
                 Vault-->>Node: previous key
                 Node->>LUKS: luks_add_key(device, new_key, old_key)
                 Node->>LUKS: luks_remove_key(device, old_key)
