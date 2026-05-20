@@ -16,9 +16,9 @@ parameters:
   luksType: luks2
   filesystem: ext4
 
-  # Tenant/institution identifier used to namespace LUKS keys in Vault.
-  # Keys are stored at: secret/tenants/<institution>/luks-keys/<volume-name>
-  institution: "default"
+  # The final path will be formatted as: {vaultPath}/{volume_name}.
+  vaultMount: "secret"
+  vaultPath: "tenants/default/luks-keys"
 
   # What to do when the PVC (and thus volume) is deleted:
   #   Delete — destroy the Vault key (all versions) and the backing PVC.

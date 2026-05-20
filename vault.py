@@ -2,7 +2,7 @@
 HashiCorp Vault helpers for LUKS key management.
 
 Keys are stored in Vault KV v2 at:
-  {VAULT_MOUNT}/tenants/{institution}/luks-keys/{volume_name}
+  {VAULT_MOUNT}/{VAULT_PATH}/{volume_name}
 
 The node and controller both authenticate via the Kubernetes auth method
 using the pod's service account JWT.
@@ -20,9 +20,9 @@ VAULT_MOUNT = os.environ.get("VAULT_MOUNT", "secret")
 _SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
 
-def _split_path(institution: str, volume_name: str) -> tuple[str, str]:
+def _split_path(vault_mount: str, vault_path: str, volume_name: str) -> tuple[str, str]:
     """Return (mount_point, secret_path) for a given institution + volume."""
-    return VAULT_MOUNT, f"tenants/{institution}/luks-keys/{volume_name}"
+    return vault_mount, f"{vault_path}/{volume_name}"
 
 
 def get_client() -> hvac.Client:
@@ -34,15 +34,14 @@ def get_client() -> hvac.Client:
     return client
 
 
-def ensure_secret(institution: str, volume_name: str) -> int:
+def ensure_secret(vault_mount: str, vault_path: str, volume_name: str) -> int:
     """
     Ensure a LUKS key exists in Vault for this volume.
-
     If absent, generates a cryptographically secure 64-char hex key and stores it.
     Returns the current Vault version number.
     """
     client = get_client()
-    mount, path = _split_path(institution, volume_name)
+    mount, path = _split_path(vault_mount, vault_path, volume_name)
     try:
         resp = client.secrets.kv.v2.read_secret_version(mount_point=mount, path=path)
         return resp["data"]["metadata"]["version"]
@@ -56,7 +55,7 @@ def ensure_secret(institution: str, volume_name: str) -> int:
         return resp["data"]["version"]
 
 
-def read_secret(institution: str, volume_name: str, version: int | None = None) -> str:
+def read_secret(vault_mount: str, vault_path: str, volume_name: str, version: int | None = None) -> str:
     """
     Read the LUKS key from Vault.
 
@@ -65,7 +64,7 @@ def read_secret(institution: str, volume_name: str, version: int | None = None) 
     Returns the key as a plain string.
     """
     client = get_client()
-    mount, path = _split_path(institution, volume_name)
+    mount, path = _split_path(vault_mount, vault_path, volume_name)
     kwargs: dict = {"mount_point": mount, "path": path}
     if version is not None:
         kwargs["version"] = version
@@ -73,22 +72,22 @@ def read_secret(institution: str, volume_name: str, version: int | None = None) 
     return resp["data"]["data"]["key"]
 
 
-def current_version(institution: str, volume_name: str) -> int:
+def current_version(vault_mount: str, vault_path: str, volume_name: str) -> int:
     """Return the current Vault version number for a volume's key."""
     client = get_client()
-    mount, path = _split_path(institution, volume_name)
+    mount, path = _split_path(vault_mount, vault_path, volume_name)
     resp = client.secrets.kv.v2.read_secret_version(mount_point=mount, path=path)
     return resp["data"]["metadata"]["version"]
 
 
-def delete_secret(institution: str, volume_name: str) -> None:
+def delete_secret(vault_mount: str, vault_path: str, volume_name: str) -> None:
     """
     Permanently delete a LUKS key and all its versions from Vault.
 
     Safe to call when the secret is already gone.
     """
     client = get_client()
-    mount, path = _split_path(institution, volume_name)
+    mount, path = _split_path(vault_mount, vault_path, volume_name)
     try:
         client.secrets.kv.v2.delete_metadata_and_all_versions(
             mount_point=mount,
@@ -98,7 +97,7 @@ def delete_secret(institution: str, volume_name: str) -> None:
         pass
 
 
-def vault_path_str(institution: str, volume_name: str) -> str:
+def vault_path_str(vault_mount: str, vault_path: str, volume_name: str) -> str:
     """Return the human-readable Vault path string (for logging and volume_context)."""
-    _, path = _split_path(institution, volume_name)
-    return f"{VAULT_MOUNT}/{path}"
+    _, path = _split_path(vault_mount, vault_path, volume_name)
+    return f"{vault_mount}/{path}"

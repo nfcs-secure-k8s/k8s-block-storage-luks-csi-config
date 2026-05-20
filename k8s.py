@@ -153,7 +153,7 @@ def emit_event(
 def get_pv_volume_attributes_by_pvc(pvc_name: str, namespace: str) -> dict:
     """Return the CSI volumeAttributes stored on the PV bound to pvc_name.
 
-    Used by DeleteVolume to read institution, vaultPath, and deletionPolicy
+    Used by DeleteVolume to read vaultMount, vaultPath, and deletionPolicy
     that were written into volume_context at CreateVolume time.
     Returns an empty dict if the PVC or PV is not found or has no CSI attributes.
     """

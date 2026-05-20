@@ -65,7 +65,7 @@ def _umount_lazy(path: str) -> None:
 
 
 
-def _open_with_rotation(device: str, mapper: str, institution: str, volume_name: str) -> None:
+def _open_with_rotation(device: str, mapper: str, vault_mount: str, vault_path: str, volume_name: str) -> None:
     """
     Open the LUKS device, performing key rotation if the Vault version has advanced.
 
@@ -75,8 +75,8 @@ def _open_with_rotation(device: str, mapper: str, institution: str, volume_name:
       3. On wrong-key failure, fetch the previous Vault version and perform
          luksAddKey (add new) + luksRemoveKey (evict old), then open.
     """
-    ver = vault_mod.current_version(institution, volume_name)
-    current_key = vault_mod.read_secret(institution, volume_name).encode()
+    ver = vault_mod.current_version(vault_mount, vault_path, volume_name)
+    current_key = vault_mod.read_secret(vault_mount, vault_path, volume_name).encode()
 
     if not luks.mapper_exists(mapper):
         try:
@@ -90,7 +90,7 @@ def _open_with_rotation(device: str, mapper: str, institution: str, volume_name:
                 "Current Vault key (v%d) rejected; attempting rotation for %s",
                 ver, device,
             )
-            prev_key = vault_mod.read_secret(institution, volume_name, version=ver - 1).encode()
+            prev_key = vault_mod.read_secret(vault_mount, vault_path, volume_name, version=ver - 1).encode()
             luks.luks_add_key(device, current_key, prev_key)
             luks.luks_remove_key(device, prev_key)
             LOG.info("Key rotation to Vault v%d complete for %s", ver, device)
@@ -106,7 +106,7 @@ class NodeServicer(csi_pb2_grpc.NodeServicer):
         Format + open the LUKS device and mount it at the staging path.
 
         Key is fetched directly from Vault using volume_context fields:
-          institution  — tenant name (default: "default")
+          vaultMount    — Vault KV mount point (default: "secret")
           vaultPath    — full Vault path (used to derive volume_name for logging)
 
         Automatic key rotation occurs if the Vault version has advanced since
@@ -128,9 +128,11 @@ class NodeServicer(csi_pb2_grpc.NodeServicer):
             context.set_details("volume_id is required")
             return csi_pb2.NodeStageVolumeResponse()
 
-        institution = ctx.get("institution", "default")
+        vault_mount = ctx.get("vaultMount", "secret")
         vault_path = ctx.get("vaultPath", "")
-        volume_name = vault_path.rsplit("/", 1)[-1] if vault_path else volume_id.replace("/", "-")
+        volume_name = vault_path.split("/")[-1]
+        vault_path_prefix = vault_path.removesuffix(f"/{volume_name}").removesuffix(f"{vault_mount}/")
+
 
         luks_type = ctx.get("luksType", "luks2")
         filesystem = ctx.get("filesystem", "ext4")
@@ -152,7 +154,7 @@ class NodeServicer(csi_pb2_grpc.NodeServicer):
                 volume_id, block_device, mapper, staging_path, vault_path,
             )
 
-            current_key = vault_mod.read_secret(institution, volume_name).encode()
+            current_key = vault_mod.read_secret(vault_mount, vault_path_prefix, volume_name).encode()
 
             if not luks.is_luks(block_device):
                 LOG.info("Device %s is not LUKS-formatted; formatting now", block_device)
@@ -161,7 +163,7 @@ class NodeServicer(csi_pb2_grpc.NodeServicer):
                 luks.make_filesystem(mapper, filesystem)
             else:
                 LOG.info("Device %s already LUKS-formatted; opening with rotation check", block_device)
-                _open_with_rotation(block_device, mapper, institution, volume_name)
+                _open_with_rotation(block_device, mapper, vault_mount, vault_path_prefix, volume_name)
 
             os.makedirs(staging_path, exist_ok=True)
             if _is_mounted(staging_path):

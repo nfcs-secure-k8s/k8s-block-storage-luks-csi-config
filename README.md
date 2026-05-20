@@ -45,11 +45,13 @@ User PVC (storageClassName: luks-encrypted)
 ```
 
 When a PVC is created, the Controller plugin auto-generates a cryptographically secure
-LUKS key in HashiCorp Vault at `secret/tenants/{institution}/luks-keys/{volume-name}`
-(idempotent — no-op if the key already exists). At mount time, the Node plugin fetches
-the key directly from Vault using the pod's Kubernetes service account JWT. Users do not
-create or manage key material. The only prerequisite is a running Vault instance with the
-Kubernetes auth method configured — see [Vault prerequisites](#vault-prerequisites) below.
+LUKS key in HashiCorp Vault at `{vaultMount}/{vaultPath}/{volume-name}`
+(e.g. `secret/tenants/default/luks-keys/{volume-name}` by default — the `vaultMount`
+and `vaultPath` are configurable StorageClass parameters). At mount time, the Node
+plugin fetches the key directly from Vault using the pod's Kubernetes service account
+JWT. Users do not create or manage key material. The only prerequisite is a running
+Vault instance with the Kubernetes auth method configured — see
+[Vault prerequisites](#vault-prerequisites) below.
 
 For architecture and sequence diagrams see [architecture.md](architecture.md).
 
@@ -187,8 +189,8 @@ Change both if you use a different name.
 
 ### 4. Create the Vault policy
 
-The policy path is identical to the kopf operator — LUKS keys are stored at
-`secret/tenants/{institution}/luks-keys/{volume-name}` in both implementations.
+LUKS keys are stored at `{vaultMount}/{vaultPath}/{volume-name}`
+(e.g. `secret/tenants/default/luks-keys/{volume-name}` by default).
 
 ```bash
 kubectl exec -i vault-0 -- vault policy write luks-policy - <<EOF
@@ -222,7 +224,8 @@ Once the CSI driver is deployed and a PVC is created, confirm the key was provis
 kubectl describe pvc <your-pvc-name>
 # Look for an event like:
 # Normal  LuksKeyProvisioned  ...  LUKS key auto-generated in Vault at
-#   "secret/tenants/default/luks-keys/<volume-id>" (v1)
+#   "{vaultMount}/{vaultPath}/<volume-id>" (v1)
+#   e.g. "secret/tenants/default/luks-keys/<volume-id>"
 ```
 
 ---
@@ -276,7 +279,8 @@ helm install luks-csi-driver ./luks-csi-driver/ \
   --set vault.address="http://vault.default.svc.cluster.local:8200" \
   --set vault.role="luks-operator-role" \
   --set storageClass.backingStorageClass="<your-block-storageclass>" \
-  --set storageClass.institution="<your-institution>"
+  --set storageClass.vaultMount="secret" \
+  --set storageClass.vaultPath="tenants/default/luks-keys"
 ```
 
 Key values to customise (all in `luks-csi-driver/values.yaml`):
@@ -286,7 +290,8 @@ Key values to customise (all in `luks-csi-driver/values.yaml`):
 | `vault.address` | `http://vault.default.svc.cluster.local:8200` | Vault API URL reachable from the cluster |
 | `vault.role` | `luks-operator-role` | Vault Kubernetes auth role (must match Vault prerequisites) |
 | `storageClass.backingStorageClass` | `local-path` | Underlying raw block StorageClass |
-| `storageClass.institution` | `default` | Namespaces LUKS keys in Vault per tenant |
+| `storageClass.vaultMount` | `secret` | Vault KV v2 mount point for LUKS keys |
+| `storageClass.vaultPath` | `tenants/default/luks-keys` | Path within the mount for LUKS keys |
 | `storageClass.deletionPolicy` | `Delete` | `Delete` destroys the Vault key on PVC deletion; `Retain` keeps it |
 | `image.repository` / `image.tag` | `luks-csi:dev` | Your built image |
 
@@ -343,7 +348,8 @@ Confirm the Vault key was auto-provisioned:
 kubectl describe pvc my-pvc
 # Look for:
 # Normal  LuksKeyProvisioned  ...  LUKS key auto-generated in Vault at
-#   "secret/tenants/default/luks-keys/<volume-id>" (v1)
+#   "{vaultMount}/{vaultPath}/<volume-id>" (v1)
+#   e.g. "secret/tenants/default/luks-keys/<volume-id>"
 ```
 
 ---
@@ -502,7 +508,7 @@ and uses the [kopf](https://github.com/nolar/kopf) framework with a custom `Encr
 |---|---|---|
 | **User interface** | Custom Resource (`EncryptedVolume`) | Standard PVC (`storageClassName: luks-encrypted`) |
 | **Key generation** | Auto-generated in Vault at CR creation (`main.py`) | Auto-generated in Vault at `CreateVolume` (`controller.py` via `vault.py`) |
-| **Key storage path** | `secret/tenants/{institution}/luks-keys/{name}` | Same path |
+| **Key storage path** | `secret/tenants/{institution}/luks-keys/{name}` | `{vaultMount}/{vaultPath}/{name}` — configurable via `vaultMount`/`vaultPath` StorageClass parameters |
 | **Key fetch at mount** | Vault Agent sidecar injects key into pod via annotations | `node.py` calls `vault.py::read_secret()` directly using service account JWT |
 | **Key rotation trigger** | 30s timer detects Vault version bump → patches `vaultVersion` annotation | 30s sync thread annotates PV; rotation auto-applied in `NodeStageVolume` |
 | **Rotation mechanism** | Privileged rekey Job: `luksAddKey` + `luksRemoveKey` | `_open_with_rotation()` in `node.py`: `luksAddKey` + `luksRemoveKey` |

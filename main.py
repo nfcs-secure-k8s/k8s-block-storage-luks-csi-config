@@ -74,13 +74,14 @@ def _sync_vault_versions() -> None:
         if not csi_spec or not csi_spec.volume_attributes:
             continue
         attrs = csi_spec.volume_attributes
-        institution = attrs.get("institution", "default")
+        vault_mount = attrs.get("vaultMount", "secret")
         vault_path = attrs.get("vaultPath", "")
         if not vault_path:
             continue
-        volume_name = vault_path.rsplit("/", 1)[-1]
+        volume_name = vault_path.split("/")[-1]
+        vault_path_prefix = vault_path.removesuffix(f"/{volume_name}").removesuffix(f"{vault_mount}/")
         try:
-            ver = vault_mod.current_version(institution, volume_name)
+            ver = vault_mod.current_version(vault_mount, vault_path_prefix, volume_name)
             api.patch_persistent_volume(
                 pv.metadata.name,
                 {"metadata": {"annotations": {_VAULT_VERSION_ANNOTATION: str(ver)}}},
