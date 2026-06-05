@@ -16,10 +16,10 @@ import subprocess
 
 import grpc
 
-from generated import csi_pb2, csi_pb2_grpc
-import device
-import luks
-import vault as vault_mod
+from luks_csi_driver.generated import csi_pb2, csi_pb2_grpc
+from luks_csi_driver import device
+from luks_csi_driver import luks
+from luks_csi_driver import vault as vault_mod
 
 LOG = logging.getLogger(__name__)
 
