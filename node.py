@@ -129,10 +129,8 @@ class NodeServicer(csi_pb2_grpc.NodeServicer):
             return csi_pb2.NodeStageVolumeResponse()
 
         vault_mount = ctx.get("vaultMount", "secret")
-        vault_path = ctx.get("vaultPath", "")
-        volume_name = vault_path.split("/")[-1]
-        vault_path_prefix = vault_path.removesuffix(f"/{volume_name}").removesuffix(f"{vault_mount}/")
-
+        vault_path_prefix = ctx.get("vaultPath", "")
+        volume_name = ctx.get("volumeName", "")
 
         luks_type = ctx.get("luksType", "luks2")
         filesystem = ctx.get("filesystem", "ext4")
@@ -150,8 +148,8 @@ class NodeServicer(csi_pb2_grpc.NodeServicer):
             )
 
             LOG.info(
-                "NodeStageVolume: volume=%s device=%s mapper=%s staging=%s vault=%s",
-                volume_id, block_device, mapper, staging_path, vault_path,
+                "NodeStageVolume: volume=%s device=%s mapper=%s staging=%s vault=%s/%s/%s",
+                volume_id, block_device, mapper, staging_path, vault_mount, vault_path_prefix, volume_name,
             )
 
             current_key = vault_mod.read_secret(vault_mount, vault_path_prefix, volume_name).encode()
