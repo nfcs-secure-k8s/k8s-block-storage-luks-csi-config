@@ -17,6 +17,7 @@ VAULT_ADDR = os.environ.get("VAULT_ADDR", "http://vault.default:8200")
 VAULT_ROLE = os.environ.get("VAULT_ROLE", "luks-operator-role")
 VAULT_MOUNT = os.environ.get("VAULT_MOUNT", "secret")
 VAULT_AUTH_MOUNT = os.environ.get("VAULT_AUTH_MOUNT", "kubernetes")
+VAULT_NAMESPACE = os.environ.get("VAULT_NAMESPACE", "")
 
 _SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
@@ -30,7 +31,7 @@ def get_client() -> hvac.Client:
     """Return an authenticated Vault client using Kubernetes service account auth."""
     with open(_SA_TOKEN_PATH) as f:
         jwt = f.read()
-    client = hvac.Client(url=VAULT_ADDR)
+    client = hvac.Client(url=VAULT_ADDR, namespace=VAULT_NAMESPACE or None)
     client.auth.kubernetes.login(role=VAULT_ROLE, jwt=jwt, mount_point=VAULT_AUTH_MOUNT)
     return client
 
