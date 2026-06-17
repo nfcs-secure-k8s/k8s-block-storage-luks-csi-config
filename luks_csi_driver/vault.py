@@ -98,8 +98,3 @@ def delete_secret(vault_mount: str, vault_path: str, volume_name: str) -> None:
     except hvac.exceptions.InvalidPath:
         pass
 
-
-def vault_path_str(vault_mount: str, vault_path: str, volume_name: str) -> str:
-    """Return the human-readable Vault path string (for logging and volume_context)."""
-    _, path = _split_path(vault_mount, vault_path, volume_name)
-    return f"{vault_mount}/{path}"
