@@ -80,4 +80,6 @@ Vault environment variables — injected into both controller and node container
   value: {{ .Values.vault.role | quote }}
 - name: VAULT_MOUNT
   value: {{ .Values.vault.mount | quote }}
+- name: VAULT_AUTH_MOUNT
+  value: {{ .Values.vault.authMount | quote }}
 {{- end }}
