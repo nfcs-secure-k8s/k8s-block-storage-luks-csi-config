@@ -39,6 +39,8 @@ vault:
   role: "luks-csi-role"
   # -- Kubernetes auth mount path (e.g. "kubernetes").
   authMount: "kubernetes"
+  # -- Vault namespace (leave empty if not using namespaces).
+  namespace: ""
   # -- KV v2 mount point where LUKS keys are stored.
   mount: "secret"
   # -- How often (seconds) the controller polls Vault versions and annotates PVs.
