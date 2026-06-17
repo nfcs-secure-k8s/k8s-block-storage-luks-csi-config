@@ -23,19 +23,25 @@ COPY luks_csi_driver/ luks_csi_driver/
 RUN uv run bash generate_proto.sh
 RUN uv sync --frozen --no-dev --no-editable --no-cache
 
+RUN rm -rf /usr/local/lib/python3.13/{idlelib,turtledemo,ensurepip} \
+    && find /usr/local -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true \
+    && find /usr/local -name '*.pyc' -delete \
+    && find /app/.venv -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true \
+    && find /app/.venv -name '*.pyc' -delete
+
 FROM gcr.io/distroless/cc-debian13@sha256:58d6ed71fe4166ab62568b10ae5850a81f8df314cfa5aef1c45bf67bd8cf0e1e
 
 WORKDIR /app
 
 COPY --from=builder /usr/local /usr/local
 COPY --from=builder /usr/lib /usr/lib
-COPY --from=builder /lib /lib
-COPY --from=builder /usr/sbin/cryptsetup /usr/sbin/blkid /usr/sbin/blockdev /usr/sbin/
+COPY --from=builder /usr/sbin/cryptsetup /usr/sbin/blkid /usr/sbin/blockdev /usr/sbin/dmsetup /usr/sbin/
+COPY --from=builder /usr/bin/mount /usr/bin/umount /usr/bin/mountpoint /usr/sbin/
 COPY --from=builder /usr/sbin/mkfs.ext4 /usr/sbin/mkfs.xfs /usr/sbin/
 
 COPY --from=builder /app/.venv /app/.venv
 
-ENV PATH="/app/.venv/bin:/usr/local/bin"
+ENV PATH="/app/.venv/bin:$PATH"
 ENV CSI_ENDPOINT=/csi/csi.sock
 ENV CSI_MODE=all
 
