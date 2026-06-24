@@ -37,6 +37,10 @@ vault:
   address: "http://vault.default.svc.cluster.local:8200"
   # -- Vault Kubernetes auth role for both the controller and node service accounts.
   role: "luks-csi-role"
+  # -- Kubernetes auth mount path (e.g. "kubernetes").
+  authMount: "kubernetes"
+  # -- Vault namespace (leave empty if not using namespaces).
+  namespace: ""
   # -- KV v2 mount point where LUKS keys are stored.
   mount: "secret"
   # -- How often (seconds) the controller polls Vault versions and annotates PVs.
@@ -49,9 +53,11 @@ storageClass:
   name: luks-encrypted
   # -- StorageClass that provisions the underlying raw block volume.
   backingStorageClass: local-path
-  # -- Tenant/institution — used to namespace LUKS keys in Vault at
-  # secret/tenants/<institution>/luks-keys/<volume-name>.
-  institution: "default"
+  # -- Vault KV v2 mount point for LUKS keys.
+  vaultMount: "secret"
+  # -- Path within the Vault KV v2 mount for LUKS keys.
+  # The final path will be formatted as: {vaultPath}/{volume_name}.
+  vaultPath: "tenants/default/luks-keys"
   # -- Delete: destroy Vault key + backing PVC on volume deletion.
   # Retain: keep both for manual recovery.
   deletionPolicy: "Delete"

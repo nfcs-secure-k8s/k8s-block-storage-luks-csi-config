@@ -47,7 +47,7 @@ from abc import ABC, abstractmethod
 
 from kubernetes import client
 
-import k8s
+from luks_csi_driver import k8s
 
 LOG = logging.getLogger(__name__)
 

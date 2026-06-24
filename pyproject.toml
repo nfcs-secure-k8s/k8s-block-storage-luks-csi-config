@@ -1,0 +1,21 @@
+[project]
+name = "luks-csi-driver"
+version = "0.1.0"
+description = "LUKS CSI driver for Kubernetes"
+requires-python = ">=3.12"
+dependencies = [
+    "grpcio>=1.60.0",
+    "grpcio-tools>=1.60.0",
+    "kubernetes>=29.0.0",
+    "hvac>=2.3.0",
+]
+
+[project.scripts]
+luks_csi_driver = "luks_csi_driver.main:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["luks_csi_driver", "luks_csi_driver.*"]

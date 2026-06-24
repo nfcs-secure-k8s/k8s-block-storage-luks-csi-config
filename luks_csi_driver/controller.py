@@ -8,7 +8,7 @@ CreateVolume:
   4. Read the backing PV to determine the raw block device path.
   5. Auto-generate a LUKS key in Vault (idempotent) for this volume.
   6. Return a Volume whose volume_context carries backingPvName, luksType,
-     filesystem, backingPvcName, backingPvcNamespace, institution, vaultPath,
+      filesystem, backingPvcName, backingPvcNamespace, vaultMount, vaultPath,
      and deletionPolicy so NodeStageVolume can resolve the device and key.
 
 DeleteVolume:
@@ -21,9 +21,9 @@ import logging
 
 import grpc
 
-from generated import csi_pb2, csi_pb2_grpc
-import k8s
-import vault as vault_mod
+from luks_csi_driver.generated import csi_pb2, csi_pb2_grpc
+from luks_csi_driver import k8s
+from luks_csi_driver import vault as vault_mod
 
 LOG = logging.getLogger(__name__)
 
@@ -32,7 +32,8 @@ PARAM_BACKING_SC      = "backingStorageClass"
 PARAM_LUKS_TYPE       = "luksType"
 PARAM_FS              = "filesystem"
 PARAM_BACKING_NS      = "backingNamespace"
-PARAM_INSTITUTION     = "institution"
+PARAM_VAULT_MOUNT     = "vaultMount"
+PARAM_VAULT_PATH      = "vaultPath"
 PARAM_DELETION_POLICY = "deletionPolicy"
 
 GiB = 1 << 30
@@ -62,7 +63,8 @@ class ControllerServicer(csi_pb2_grpc.ControllerServicer):
 
         luks_type = params.get(PARAM_LUKS_TYPE, "luks2")
         filesystem = params.get(PARAM_FS, "ext4")
-        institution = params.get(PARAM_INSTITUTION, "default")
+        vault_mount = params.get(PARAM_VAULT_MOUNT, "secret")
+        vault_path_prefix = params.get(PARAM_VAULT_PATH, "tenants/default/luks-keys")
         deletion_policy = params.get(PARAM_DELETION_POLICY, "Delete")
 
         namespace = (
@@ -78,8 +80,8 @@ class ControllerServicer(csi_pb2_grpc.ControllerServicer):
         volume_id = f"{namespace}/{pvc_name}"
 
         LOG.info(
-            "CreateVolume: name=%s pvc=%s/%s sc=%s size=%s institution=%s",
-            name, namespace, pvc_name, backing_sc, size_str, institution,
+            "CreateVolume: name=%s pvc=%s/%s sc=%s size=%s vault_mount=%s vault_path=%s",
+            name, namespace, pvc_name, backing_sc, size_str, vault_mount, vault_path_prefix,
         )
 
         try:
@@ -89,10 +91,9 @@ class ControllerServicer(csi_pb2_grpc.ControllerServicer):
             # Auto-generate LUKS key in Vault (no-op if already exists).
             # We use the CSI volume name (not the PVC name) as the Vault key
             # identifier so it stays stable across renames.
-            vault_ver = vault_mod.ensure_secret(institution, name)
-            vault_path = vault_mod.vault_path_str(institution, name)
+            vault_ver = vault_mod.ensure_secret(vault_mount, vault_path_prefix, name)
             LOG.info(
-                "Vault key ready for %s at %s (v%d)", name, vault_path, vault_ver
+                "Vault key ready for %s at %s/%s/%s (v%d)", name, vault_mount, vault_path_prefix, name, vault_ver
             )
 
             volume_context = {
@@ -101,20 +102,22 @@ class ControllerServicer(csi_pb2_grpc.ControllerServicer):
                 "backingPvName": pv_name,
                 "luksType": luks_type,
                 "filesystem": filesystem,
-                "institution": institution,
-                "vaultPath": vault_path,
+                "vaultMount": vault_mount,
+                "vaultPath": vault_path_prefix,
+                "volumeName": name,
                 "deletionPolicy": deletion_policy,
             }
 
             user_pvc_name = params.get("csi.storage.k8s.io/pvc-name")
             if user_pvc_name:
+                key_path = f"{vault_mount}/{vault_path_prefix}/{name}"
                 k8s.emit_event(
                     name=user_pvc_name,
                     namespace=namespace,
                     reason="LuksKeyProvisioned",
                     message=(
                         f"Volume provisioned. LUKS key auto-generated in Vault at "
-                        f'"{vault_path}" (v{vault_ver}). '
+                        f'"{key_path}" (v{vault_ver}). '
                         f"Deletion policy: {deletion_policy}."
                     ),
                 )
@@ -145,18 +148,18 @@ class ControllerServicer(csi_pb2_grpc.ControllerServicer):
 
         try:
             # Retrieve volume_context from the PV before deleting the PVC so we
-            # know institution, vaultPath, and deletionPolicy.
+            # know vaultMount, vaultPath, volumeName, and deletionPolicy.
             attrs = k8s.get_pv_volume_attributes_by_pvc(pvc_name, namespace)
             deletion_policy = attrs.get("deletionPolicy", "Delete")
-            institution = attrs.get("institution", "default")
-            vault_path = attrs.get("vaultPath", "")
+            vault_mount = attrs.get("vaultMount", "secret")
+            vault_path_prefix = attrs.get("vaultPath", "")
+            volume_name = attrs.get("volumeName", "")
 
-            if deletion_policy == "Delete" and vault_path:
-                volume_name = vault_path.rsplit("/", 1)[-1]
+            if deletion_policy == "Delete" and vault_path_prefix and volume_name:
                 LOG.info(
-                    "deletionPolicy=Delete: destroying Vault key at %s", vault_path
+                    "deletionPolicy=Delete: destroying Vault key at %s/%s/%s", vault_mount, vault_path_prefix, volume_name
                 )
-                vault_mod.delete_secret(institution, volume_name)
+                vault_mod.delete_secret(vault_mount, vault_path_prefix, volume_name)
 
             k8s.delete_pvc(pvc_name, namespace)
 

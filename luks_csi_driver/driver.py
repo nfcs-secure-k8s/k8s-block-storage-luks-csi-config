@@ -2,7 +2,7 @@
 CSI Identity service — plugin info and capabilities.
 """
 
-from generated import csi_pb2, csi_pb2_grpc
+from luks_csi_driver.generated import csi_pb2, csi_pb2_grpc
 
 DRIVER_NAME = "luks.csi.example.com"
 DRIVER_VERSION = "0.1.0"

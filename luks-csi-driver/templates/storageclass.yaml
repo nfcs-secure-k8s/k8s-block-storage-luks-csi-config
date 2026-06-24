@@ -12,6 +12,7 @@ parameters:
   backingStorageClass: {{ .Values.storageClass.backingStorageClass | quote }}
   luksType: {{ .Values.storageClass.luksType | quote }}
   filesystem: {{ .Values.storageClass.filesystem | quote }}
-  institution: {{ .Values.storageClass.institution | quote }}
+  vaultMount: {{ .Values.storageClass.vaultMount | quote }}
+  vaultPath: {{ .Values.storageClass.vaultPath | quote }}
   deletionPolicy: {{ .Values.storageClass.deletionPolicy | quote }}
 {{- end }}

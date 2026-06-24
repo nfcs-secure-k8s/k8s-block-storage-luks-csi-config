@@ -18,12 +18,12 @@ from concurrent import futures
 
 import grpc
 
-from generated import csi_pb2_grpc
-from driver import IdentityServicer
-from controller import ControllerServicer
-from node import NodeServicer
-import k8s
-import vault as vault_mod
+from luks_csi_driver.generated import csi_pb2_grpc
+from luks_csi_driver.driver import IdentityServicer
+from luks_csi_driver.controller import ControllerServicer
+from luks_csi_driver.node import NodeServicer
+from luks_csi_driver import k8s
+from luks_csi_driver import vault as vault_mod
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -74,13 +74,13 @@ def _sync_vault_versions() -> None:
         if not csi_spec or not csi_spec.volume_attributes:
             continue
         attrs = csi_spec.volume_attributes
-        institution = attrs.get("institution", "default")
-        vault_path = attrs.get("vaultPath", "")
-        if not vault_path:
+        vault_mount = attrs.get("vaultMount", "secret")
+        vault_path_prefix = attrs.get("vaultPath", "")
+        volume_name = attrs.get("volumeName", "")
+        if not vault_path_prefix or not volume_name:
             continue
-        volume_name = vault_path.rsplit("/", 1)[-1]
         try:
-            ver = vault_mod.current_version(institution, volume_name)
+            ver = vault_mod.current_version(vault_mount, vault_path_prefix, volume_name)
             api.patch_persistent_volume(
                 pv.metadata.name,
                 {"metadata": {"annotations": {_VAULT_VERSION_ANNOTATION: str(ver)}}},
@@ -139,7 +139,7 @@ def serve(socket_path: str, mode: str) -> None:
     server.wait_for_termination()
 
 
-if __name__ == "__main__":
+def main() -> None:
     socket_path = os.environ.get("CSI_ENDPOINT", DEFAULT_SOCKET)
     mode = os.environ.get("CSI_MODE", "all").lower()
 
@@ -149,3 +149,7 @@ if __name__ == "__main__":
 
     LOG.info("Starting LUKS CSI driver (mode=%s, socket=%s)", mode, socket_path)
     serve(socket_path, mode)
+
+
+if __name__ == "__main__":
+    main()
