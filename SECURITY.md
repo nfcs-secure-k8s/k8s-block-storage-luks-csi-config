@@ -27,7 +27,7 @@ etcd. For HIPAA/GDPR workloads, key material should come from an external KMS
 (HashiCorp Vault, AWS KMS, GCP KMS). The CSI external secrets mechanism
 supports this — but the driver currently has no KMS adapter.
 
-**Affected files:** [`manifests/storageclass.yaml`](manifests/storageclass.yaml)
+**Affected files:** [`chart/templates/storageclass.yaml`](chart/templates/storageclass.yaml)
 
 **Mitigation:** Configure etcd encryption-at-rest as a deployment prerequisite,
 or integrate a Vault Agent sidecar that injects the key at mount time rather
@@ -37,9 +37,17 @@ than storing it as a native Secret.
 
 ### C2 — Node Secret ClusterRole is cluster-wide
 
-[`manifests/rbac.yaml`](manifests/rbac.yaml) grants `get` on **all Secrets in
-all namespaces** to the node DaemonSet ServiceAccount. On a shared research
-cluster, the node plugin on any node can read any project's LUKS key.
+> **Mitigated:** the node ClusterRole no longer requires `secrets/get` — LUKS keys
+> are fetched directly from Vault using the pod's service account JWT (see the
+> note at the top of this document). The finding is retained for historical
+> context.
+
+[`chart/templates/rbac.yaml`](chart/templates/rbac.yaml) originally granted `get`
+on **all Secrets in all namespaces** to the node DaemonSet ServiceAccount. The
+current node ClusterRole grants `pods` (create/delete/get/list/watch) and
+`persistentvolumes`/`nodes` (get/list/watch) instead — cluster-scoped permissions
+that remain a (smaller) blast-radius concern on shared research clusters, since
+the node plugin can create staging pods in any namespace.
 
 **Mitigation options:**
 - Use per-namespace `Role` + `RoleBinding` instead of `ClusterRole`
@@ -175,7 +183,7 @@ strong), but some regulators require explicit erasure evidence (NIST SP 800-88).
 
 ### M4 — Full `/dev` mounted into the privileged DaemonSet
 
-[`manifests/node.yaml`](manifests/node.yaml) mounts the entire host `/dev`
+[`chart/templates/node.yaml`](chart/templates/node.yaml) mounts the entire host `/dev`
 directory. Combined with `privileged: true`, a compromised node plugin process
 can read any other block device on the node, including volumes belonging to
 other tenants.
@@ -188,10 +196,14 @@ access to only the required block device.
 
 ### M5 — No seccomp profile
 
-[`manifests/node.yaml`](manifests/node.yaml) specifies no `seccompProfile`.
+[`chart/templates/node.yaml`](chart/templates/node.yaml) specifies no `seccompProfile`.
 While `privileged: true` already bypasses Linux capability restrictions, a
 seccomp profile at minimum `RuntimeDefault` limits the available syscall surface
-and is required by many CIS benchmarks used in health data infrastructure.
+and is required by many CIS benchmarks used in health data infrastructure. The
+non-privileged sidecar containers (`node-driver-registrar`, `external-provisioner`,
+and the `luks-csi` controller container) now set `seccompProfile: RuntimeDefault`
+in the chart; the privileged `luks-csi` node container cannot use seccomp while
+`privileged: true`.
 
 ---
 
