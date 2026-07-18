@@ -10,6 +10,10 @@ spec:
     matchLabels:
       {{- include "luks-csi-driver.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: node
+  {{- with .Values.node.updateStrategy }}
+  updateStrategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   template:
     metadata:
       labels:
@@ -27,12 +31,31 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.node.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.node.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: luks-csi
           image: {{ include "luks-csi-driver.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
-            privileged: true
+            privileged: true   # required for cryptsetup / dm-crypt / mount
           env:
             - name: CSI_ENDPOINT
               value: /csi/csi.sock
@@ -47,6 +70,10 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
             {{- include "luks-csi-driver.vaultEnv" . | nindent 12 }}
+          {{- with .Values.node.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: plugin-dir
               mountPath: /csi
@@ -65,6 +92,13 @@ spec:
             - --csi-address=/csi/csi.sock
             - --kubelet-registration-path=/var/lib/kubelet/plugins/{{ .Values.driverName }}/csi.sock
             - --v=5
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
+          {{- with .Values.sidecars.nodeDriverRegistrar.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           lifecycle:
             preStop:
               exec:

@@ -1,0 +1,183 @@
+# -- Override the chart name used in resource names and labels.
+nameOverride: ""
+# -- Override the full release name used in resource names.
+fullnameOverride: ""
+
+# -- Kubernetes namespace for all chart resources.
+namespace: kube-system
+
+# -- CSI driver name. Must match the provisioner field in the StorageClass.
+driverName: luks.csi.example.com
+
+# Driver container image
+image:
+  repository: luks-csi
+  tag: dev
+  # -- Set to IfNotPresent or Always when using a registry.
+  pullPolicy: Never
+
+# -- Image pull secrets for the driver container (e.g. a private registry).
+imagePullSecrets: []
+# - name: my-registry-secret
+
+# Kubernetes CSI sidecar images
+sidecars:
+  provisioner:
+    image: registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
+    # -- Resource requests/limits for the external-provisioner sidecar.
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
+  nodeDriverRegistrar:
+    image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.12.0
+    # -- Resource requests/limits for the node-driver-registrar sidecar.
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
+
+# Controller Deployment settings
+controller:
+  replicaCount: 1
+  # -- Node selector applied to the controller pods.
+  nodeSelector: {}
+  # -- Affinity rules applied to the controller pods.
+  affinity: {}
+  # -- Tolerations applied to the controller pods.
+  tolerations: []
+  # -- Optional priority class name for the controller pods.
+  priorityClassName: ""
+  # -- Pod-level security context for the controller pods.
+  podSecurityContext: {}
+  # -- Resource requests/limits for the luks-csi controller container.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  # -- Liveness/readiness probes for the luks-csi controller container.
+  # The default probe checks the CSI Unix socket exists at /csi/csi.sock.
+  probes:
+    enabled: true
+    liveness:
+      exec:
+        command:
+          - ls
+          - -S
+          - /csi/csi.sock
+      initialDelaySeconds: 10
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3
+    readiness:
+      exec:
+        command:
+          - ls
+          - -S
+          - /csi/csi.sock
+      initialDelaySeconds: 5
+      periodSeconds: 15
+      timeoutSeconds: 5
+      failureThreshold: 3
+
+# Node DaemonSet settings
+node:
+  # -- Node selector applied to the node DaemonSet pods.
+  nodeSelector: {}
+  # -- Affinity rules applied to the node DaemonSet pods.
+  affinity: {}
+  # -- Tolerations applied to the node DaemonSet pods.
+  tolerations: []
+  # -- Optional priority class name for the node DaemonSet pods.
+  priorityClassName: ""
+  # -- Pod-level security context for the node DaemonSet pods.
+  podSecurityContext: {}
+  # -- DaemonSet update strategy.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  # -- Resource requests/limits for the luks-csi node container.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# HashiCorp Vault connection settings
+vault:
+  # -- Vault API address reachable from within the cluster.
+  address: "http://vault.default.svc.cluster.local:8200"
+  # -- Vault Kubernetes auth role for both the controller and node service accounts.
+  # Matches the role created by the documented Vault prerequisites (see README).
+  role: "luks-operator-role"
+  # -- Kubernetes auth mount path (e.g. "kubernetes").
+  authMount: "kubernetes"
+  # -- Vault namespace (leave empty if not using namespaces).
+  namespace: ""
+  # -- KV v2 mount point where LUKS keys are stored.
+  mount: "secret"
+  # -- How often (seconds) the controller polls Vault versions and annotates PVs.
+  syncInterval: 30
+
+# StorageClass settings
+storageClass:
+  # -- Set to false to skip StorageClass creation (e.g. if you manage it separately).
+  enabled: true
+  name: luks-encrypted
+  # -- StorageClass that provisions the underlying raw block volume.
+  backingStorageClass: local-path
+  # -- Vault KV v2 mount point for LUKS keys.
+  vaultMount: "secret"
+  # -- Path within the Vault KV v2 mount for LUKS keys.
+  # The final path will be formatted as: {vaultPath}/{volume_name}.
+  vaultPath: "tenants/default/luks-keys"
+  # -- Delete: destroy Vault key + backing PVC on volume deletion.
+  # Retain: keep both for manual recovery.
+  deletionPolicy: "Delete"
+  luksType: luks2
+  filesystem: ext4
+
+# AppArmor profile loader
+apparmor:
+  # -- Set to false to skip the AppArmor ConfigMap and loader DaemonSet.
+  # The AppArmor annotation on the node DaemonSet will still be present;
+  # disable it separately if your nodes don't support AppArmor.
+  enabled: true
+  # -- Set to false to remove the AppArmor annotation from the node pod spec.
+  # Useful when testing on nodes where the profile has not been loaded yet.
+  annotate: true
+  # -- Resource requests/limits for the AppArmor loader init container.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+# Loop-device test resources (NOT for production).
+# When enabled, the chart deploys a static loop-backed StorageClass, a PV,
+# a Secret holding a LUKS passphrase, a PVC, and a test pod — useful for
+# end-to-end validation in a Lima/k3s environment. See testing/ for the
+# equivalent Ceph and Longhorn test resources.
+testResources:
+  enabled: false
+  namespace: default
+  storageSize: 1Gi
+  loopDevice: /dev/loop0
+  backingStorageClassName: loop-backing
+  luksStorageClassName: luks-encrypted-loop
+  # -- Test-only LUKS passphrase. Change before applying or inject via --set.
+  luksKey: "my-test-passphrase-change-me"

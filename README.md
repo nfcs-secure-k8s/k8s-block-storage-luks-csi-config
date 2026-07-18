@@ -65,10 +65,10 @@ csi-driver/
 ├── node.py               # Node service (NodeStageVolume, NodePublishVolume, ...)
 ├── device.py             # Device resolution and attachment:
 │                         #   extensible RESOLVERS registry (Longhorn, Ceph, ByIdResolver, …)
-│                         #   attach_and_resolve() — VolumeAttachment lifecycle + device wait
+│                         #   attach_and_resolve() — staging-pod lifecycle + device wait
 ├── luks.py               # cryptsetup and mkfs subprocess wrappers
 ├── vault.py              # HashiCorp Vault KV v2 client (ensure/read/delete key, rotation)
-├── k8s.py                # Kubernetes API helpers (PVC/PV/Event/VolumeAttachment)
+├── k8s.py                # Kubernetes API helpers (PVC/PV/Event)
 ├── requirements.txt
 ├── Dockerfile
 ├── generate_proto.sh     # Generates Python gRPC stubs from csi.proto
@@ -79,13 +79,19 @@ csi-driver/
 ├── generated/            # Auto-generated — run generate_proto.sh to create
 │   ├── csi_pb2.py
 │   └── csi_pb2_grpc.py
-└── manifests/
-    ├── csidriver.yaml     # CSIDriver registration
-    ├── storageclass.yaml  # Example StorageClass (luks-encrypted)
-    ├── controller.yaml    # Deployment: luks-csi (controller) + external-provisioner
-    ├── node.yaml          # DaemonSet: luks-csi (node) + node-driver-registrar
-    ├── rbac.yaml          # ServiceAccounts, ClusterRoles, ClusterRoleBindings
-    └── test-resources.yaml  # Loop-device test: SC, PV, Secret, PVC, Pod
+└── chart/                # Helm chart — single source of truth for deployment
+    ├── Chart.yaml
+    ├── values.yaml       # All tunables (vault, image, storageClass, hardening, …)
+    └── templates/
+        ├── _helpers.tpl
+        ├── csidriver.yaml        # CSIDriver registration
+        ├── storageclass.yaml    # Example StorageClass (luks-encrypted)
+        ├── controller.yaml       # Deployment: luks-csi (controller) + external-provisioner
+        ├── node.yaml             # DaemonSet: luks-csi (node) + node-driver-registrar
+        ├── rbac.yaml             # ClusterRoles + ClusterRoleBindings
+        ├── serviceaccounts.yaml  # Controller + node ServiceAccounts
+        ├── apparmor-profile.yaml # AppArmor ConfigMap + loader DaemonSet
+        └── test-resources.yaml   # Loop-device test fixtures (gated by testResources.enabled)
 ```
 
 ---
@@ -112,7 +118,7 @@ csi-driver/
 - Vault 1.12+ with the KV v2 secrets engine enabled at the `secret/` mount
 - Kubernetes auth method enabled and configured against your cluster
 - A Vault role bound to the `luks-csi-controller` and `luks-csi-node` service accounts
-  in the `kube-system` namespace (role name configurable via `luks-csi-driver/values.yaml`)
+  in the `kube-system` namespace (role name configurable via `chart/values.yaml`)
 - A Vault policy granting `create/read/update/delete/list` on `secret/data/tenants/*`
   and `secret/metadata/tenants/*`
 
@@ -182,7 +188,7 @@ kubectl exec vault-0 -- vault write auth/kubernetes/role/luks-operator-role \
     ttl="24h"
 ```
 
-The role name (`luks-operator-role`) matches the default in `luks-csi-driver/values.yaml`.
+The role name (`luks-operator-role`) matches the default in `chart/values.yaml`.
 Change both if you use a different name.
 
 ### 4. Create the Vault policy
@@ -271,51 +277,43 @@ Identify a StorageClass in your cluster that provisions raw block volumes (e.g.
 **Via Helm (recommended):**
 
 ```bash
-helm install luks-csi-driver ./luks-csi-driver/ \
+helm install luks-csi-driver ./chart/ \
   --namespace kube-system \
   --set vault.address="http://vault.default.svc.cluster.local:8200" \
   --set vault.role="luks-operator-role" \
   --set storageClass.backingStorageClass="<your-block-storageclass>" \
-  --set storageClass.institution="<your-institution>"
+  --set storageClass.vaultPath="tenants/<your-institution>/luks-keys"
 ```
 
-Key values to customise (all in `luks-csi-driver/values.yaml`):
+Key values to customise (all in `chart/values.yaml`):
 
 | Value | Default | Description |
 |---|---|---|
 | `vault.address` | `http://vault.default.svc.cluster.local:8200` | Vault API URL reachable from the cluster |
 | `vault.role` | `luks-operator-role` | Vault Kubernetes auth role (must match Vault prerequisites) |
 | `storageClass.backingStorageClass` | `local-path` | Underlying raw block StorageClass |
-| `storageClass.institution` | `default` | Namespaces LUKS keys in Vault per tenant |
+| `storageClass.vaultPath` | `tenants/default/luks-keys` | Vault KV v2 path; the second-to-last segment namespaces LUKS keys per tenant |
 | `storageClass.deletionPolicy` | `Delete` | `Delete` destroys the Vault key on PVC deletion; `Retain` keeps it |
-| `image.repository` / `image.tag` | `luks-csi:dev` | Your built image |
+| `image.repository` / `image.tag` | `luks-csi` / `dev` | Your built image |
+| `apparmor.enabled` | `true` | Set `false` on nodes without AppArmor support |
+| `testResources.enabled` | `false` | Set `true` to deploy the loop-device test fixtures |
 
-**Via raw manifests (alternative):**
+### Apply values via a values file
 
-Edit `manifests/storageclass.yaml` and set `backingStorageClass`:
-
-```yaml
-parameters:
-  backingStorageClass: csi-cinder-sc-retain   # or rbd-sc, ebs-sc, etc.
-  luksType: luks2
-  filesystem: ext4
-```
-
-Then deploy:
+For repeatable installs, copy and edit `chart/values.yaml` (or create an overlay
+like `erkubet-values.yaml` in this repo):
 
 ```bash
-kubectl apply -f csi-driver/manifests/csidriver.yaml \
-              -f csi-driver/manifests/rbac.yaml \
-              -f csi-driver/manifests/storageclass.yaml \
-              -f csi-driver/manifests/controller.yaml \
-              -f csi-driver/manifests/node.yaml
+helm install luks-csi-driver ./chart/ \
+  --namespace kube-system \
+  --values my-values.yaml
 ```
 
-Wait for both workloads to be ready:
+### Wait for both workloads to be ready
 
 ```bash
-kubectl rollout status deployment/luks-csi-controller -n kube-system
-kubectl rollout status daemonset/luks-csi-node -n kube-system
+kubectl rollout status deployment/luks-csi-driver-controller -n kube-system
+kubectl rollout status daemonset/luks-csi-driver-node -n kube-system
 ```
 
 ### 4. Provision an encrypted volume
@@ -419,31 +417,32 @@ limactl shell k3s -- sudo bash -c "
 ### Deploy the CSI driver
 
 ```bash
-kubectl apply -f csi-driver/manifests/csidriver.yaml \
-              -f csi-driver/manifests/rbac.yaml \
-              -f csi-driver/manifests/storageclass.yaml \
-              -f csi-driver/manifests/controller.yaml \
-              -f csi-driver/manifests/node.yaml
+helm upgrade --install luks-csi-driver ./chart/ \
+  --namespace kube-system \
+  --set image.repository=luks-csi \
+  --set image.tag=dev \
+  --set image.pullPolicy=Never \
+  --set storageClass.backingStorageClass=loop-backing \
+  --set apparmor.enabled=false \
+  --set apparmor.annotate=false \
+  --set testResources.enabled=true
 ```
 
 Wait for both workloads to be ready:
 
 ```bash
-kubectl rollout status deployment/luks-csi-controller -n kube-system
-kubectl rollout status daemonset/luks-csi-node -n kube-system
+kubectl rollout status deployment/luks-csi-driver-controller -n kube-system
+kubectl rollout status daemonset/luks-csi-driver-node -n kube-system
 ```
 
 ### Run the end-to-end test
 
-```bash
-kubectl apply -f csi-driver/manifests/test-resources.yaml
-```
+The loop-device test fixtures are deployed by the same `helm install` above
+(`testResources.enabled=true`). This creates:
 
-This creates:
 - `loop-backing` StorageClass (static provisioner for the loop device)
 - `luks-loop-pv` PV pointing at `/dev/loop0`
 - `luks-encrypted-loop` StorageClass (our CSI driver, backed by `loop-backing`)
-- `test-pvc-luks-key` Secret with the LUKS passphrase
 - `test-pvc` PVC using `luks-encrypted-loop`
 - `luks-test-pod` that writes `hello from luks` to `/mnt/data/test.txt`
 
@@ -481,7 +480,7 @@ mode:    read/write
 ### Tear down
 
 ```bash
-kubectl delete -f csi-driver/manifests/test-resources.yaml
+helm uninstall luks-csi-driver --namespace kube-system
 ```
 
 ---

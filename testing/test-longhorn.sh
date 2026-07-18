@@ -266,7 +266,7 @@ kubectl delete deployment  -n kube-system -l app.kubernetes.io/name=luks-csi-dri
 kubectl delete daemonset   -n kube-system -l app.kubernetes.io/name=luks-csi-driver --ignore-not-found
 
 info "Deploying LUKS CSI driver (Helm) ..."
-helm upgrade --install luks-csi-driver "${REPO_ROOT}/luks-csi-driver/" \
+helm upgrade --install luks-csi-driver "${REPO_ROOT}/chart/" \
   --namespace kube-system \
   --set storageClass.backingStorageClass=longhorn \
   --set apparmor.enabled=false \

@@ -1,24 +1,15 @@
-# AppArmor profile for the luks-csi node container.
-#
-# This profile is a whitelist that allows only the specific binaries,
-# capabilities, and device access that the LUKS CSI node container needs.
-# It is ported directly from the upstream kopf operator's k8s-luks-restricted.sh.
-#
-# DEPLOYMENT:
-#   The profile must be loaded on every node before the DaemonSet will
-#   honour the AppArmor annotation. Use the DaemonSet below to do this
-#   automatically at node startup.
-#
-#   kubectl apply -f manifests/apparmor-profile.yaml
-#
-# The node DaemonSet (node.yaml) references this profile via:
-#   container.apparmor.security.beta.kubernetes.io/luks-csi: localhost/k8s-luks-restricted
+{{- if .Values.apparmor.enabled }}
 ---
+# ConfigMap holding the AppArmor profile content.
+# The loader DaemonSet below writes this to /etc/apparmor.d/ on every node
+# and calls apparmor_parser to activate it.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: luks-apparmor-profile
-  namespace: kube-system
+  name: {{ include "luks-csi-driver.fullname" . }}-apparmor
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "luks-csi-driver.labels" . | nindent 4 }}
 data:
   k8s-luks-restricted: |
     include <tunables/global>
@@ -27,7 +18,6 @@ data:
       include <abstractions/base>
       include <abstractions/nameservice>
 
-      # Allowed binaries
       /bin/sh ix,
       /bin/busybox ix,
       /sbin/apk ix,
@@ -49,7 +39,6 @@ data:
       /{usr/,}bin/chown ix,
       /{usr/,}bin/chmod ix,
 
-      # Required capabilities
       capability chown,
       capability fowner,
       capability fsetid,
@@ -67,7 +56,6 @@ data:
       network alg,
       network unix,
 
-      # Block devices
       /dev/vd* rwmk,
       /dev/sd* rwmk,
       /dev/dm-* rwmk,
@@ -77,7 +65,6 @@ data:
       /dev/urandom r,
       /dev/random r,
 
-      # System info
       / r,
       /etc/mke2fs.conf r,
       /etc/ssl/openssl.cnf r,
@@ -90,42 +77,46 @@ data:
       /sys/block/** r,
       /sys/fs/ r,
 
-      # Runtime and cryptsetup locks
       /run/ r,
       /run/mount/ rw,
       /run/mount/** rw,
       /run/cryptsetup/ rwk,
       /run/cryptsetup/** rwk,
 
-      # Mount paths used by the CSI staging/publish flow
       /var/lib/kubelet/** rw,
 
       mount fstype=ext4,
       mount fstype=xfs,
       umount,
 
-      # Hard denials
       deny /etc/shadow w,
       deny /root/** w,
       deny /sys/firmware/** rw,
     }
 ---
 # DaemonSet that loads the AppArmor profile on every node at startup.
-# Runs once per node (initContainers only) and then sleeps indefinitely
-# to keep the pod Running (so kubelet can track it).
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: luks-apparmor-loader
-  namespace: kube-system
+  name: {{ include "luks-csi-driver.fullname" . }}-apparmor-loader
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "luks-csi-driver.labels" . | nindent 4 }}
+    app.kubernetes.io/component: apparmor-loader
 spec:
   selector:
     matchLabels:
-      app: luks-apparmor-loader
+      {{- include "luks-csi-driver.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: apparmor-loader
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
   template:
     metadata:
       labels:
-        app: luks-apparmor-loader
+        {{- include "luks-csi-driver.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: apparmor-loader
     spec:
       hostPID: true
       initContainers:
@@ -136,12 +127,15 @@ spec:
             - -c
             - |
               set -e
-              echo "Loading k8s-luks-restricted AppArmor profile..."
               cp /profiles/k8s-luks-restricted /etc/apparmor.d/k8s-luks-restricted
               apparmor_parser -r /etc/apparmor.d/k8s-luks-restricted
-              echo "Profile loaded."
+              echo "AppArmor profile k8s-luks-restricted loaded."
           securityContext:
             privileged: true
+          {{- with .Values.apparmor.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: profile
               mountPath: /profiles
@@ -153,8 +147,9 @@ spec:
       volumes:
         - name: profile
           configMap:
-            name: luks-apparmor-profile
+            name: {{ include "luks-csi-driver.fullname" . }}-apparmor
         - name: apparmor-d
           hostPath:
             path: /etc/apparmor.d
             type: DirectoryOrCreate
+{{- end }}

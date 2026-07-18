@@ -1,0 +1,106 @@
+{{- if .Values.testResources.enabled }}
+---
+# Loop-device test resources for Lima/k3s (NOT for production).
+#
+# Setup before applying:
+#   limactl shell k3s -- sudo bash -c "
+#     dd if=/dev/zero of=/tmp/test-block.img bs=1M count=1200
+#     losetup {{ .Values.testResources.loopDevice }} /tmp/test-block.img
+#   "
+---
+# Static-provisioner StorageClass for the loop device.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.testResources.backingStorageClassName | quote }}
+  labels:
+    {{- include "luks-csi-driver.labels" . | nindent 4 }}
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: Immediate
+---
+# PV backed by the loop device inside the Lima VM.
+# Label 'loop-device: "0"' allows PVCs to use a labelSelector for
+# deterministic binding.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: luks-loop-pv
+  labels:
+    {{- include "luks-csi-driver.labels" . | nindent 4 }}
+    loop-device: "0"
+spec:
+  capacity:
+    storage: {{ .Values.testResources.storageSize }}
+  accessModes: [ReadWriteOnce]
+  volumeMode: Block
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: {{ .Values.testResources.backingStorageClassName | quote }}
+  local:
+    path: {{ .Values.testResources.loopDevice | quote }}
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: Exists
+---
+# StorageClass tying the LUKS CSI driver to the loop-backing storage.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.testResources.luksStorageClassName | quote }}
+  labels:
+    {{- include "luks-csi-driver.labels" . | nindent 4 }}
+provisioner: {{ .Values.driverName }}
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+parameters:
+  backingStorageClass: {{ .Values.testResources.backingStorageClassName | quote }}
+  luksType: {{ .Values.storageClass.luksType | quote }}
+  filesystem: {{ .Values.storageClass.filesystem | quote }}
+  vaultMount: {{ .Values.storageClass.vaultMount | quote }}
+  vaultPath: {{ .Values.storageClass.vaultPath | quote }}
+  deletionPolicy: {{ .Values.storageClass.deletionPolicy | quote }}
+---
+# PVC requesting an encrypted volume through the LUKS CSI driver.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-pvc
+  namespace: {{ .Values.testResources.namespace | quote }}
+  labels:
+    {{- include "luks-csi-driver.labels" . | nindent 4 }}
+spec:
+  storageClassName: {{ .Values.testResources.luksStorageClassName | quote }}
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ .Values.testResources.storageSize }}
+---
+# Test pod that mounts the encrypted volume and writes a marker file.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: luks-test-pod
+  namespace: {{ .Values.testResources.namespace | quote }}
+  labels:
+    {{- include "luks-csi-driver.labels" . | nindent 4 }}
+spec:
+  containers:
+    - name: app
+      image: alpine:3.19
+      command:
+        - sh
+        - -c
+        - |
+          echo 'hello from luks' > /mnt/data/test.txt
+          cat /mnt/data/test.txt
+          sleep 3600
+      volumeMounts:
+        - name: encrypted-vol
+          mountPath: /mnt/data
+  volumes:
+    - name: encrypted-vol
+      persistentVolumeClaim:
+        claimName: test-pvc
+{{- end }}

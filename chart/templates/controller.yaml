@@ -22,10 +22,32 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.controller.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.controller.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: luks-csi
           image: {{ include "luks-csi-driver.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
           env:
             - name: CSI_ENDPOINT
               value: /csi/csi.sock
@@ -34,6 +56,16 @@ spec:
             - name: VAULT_SYNC_INTERVAL
               value: {{ .Values.vault.syncInterval | quote }}
             {{- include "luks-csi-driver.vaultEnv" . | nindent 12 }}
+          {{- with .Values.controller.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.controller.probes.enabled }}
+          livenessProbe:
+            {{- toYaml .Values.controller.probes.liveness | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.controller.probes.readiness | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
@@ -45,6 +77,13 @@ spec:
             - --leader-election
             - --leader-election-namespace={{ .Values.namespace }}
             - --v=5
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
+          {{- with .Values.sidecars.provisioner.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: socket-dir
               mountPath: /csi

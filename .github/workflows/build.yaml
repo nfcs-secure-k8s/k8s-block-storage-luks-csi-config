@@ -70,7 +70,7 @@ jobs:
         uses: azure/setup-helm@v4
 
       - name: Lint Helm chart
-        run: helm lint luks-csi-driver/
+        run: helm lint chart/
 
       - name: Determine chart version
         id: chart-version
@@ -83,7 +83,7 @@ jobs:
 
       - name: Package Helm chart
         run: |
-          helm package luks-csi-driver/ \
+          helm package chart/ \
             --version ${{ steps.chart-version.outputs.version }} \
             --app-version ${{ steps.chart-version.outputs.version }}
 
