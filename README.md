@@ -170,13 +170,29 @@ Skip this if KV v2 is already enabled (you'll get an error if it's already mount
 
 ### 3. Create the CSI driver Vault role
 
-The CSI driver uses **two** service accounts (`luks-csi-controller` and `luks-csi-node`
-in the `kube-system` namespace), both of which must be included in the role. This is
-different from the kopf operator, which uses `encrypted-volume-operator` in `default`.
+The CSI driver uses **two** service accounts, both of which must be included in the
+role — but their exact names depend on which deployment path you use below, since
+Helm derives them from the release name (`luks-csi-driver.fullname` in
+`_helpers.tpl`) while the raw manifests use fixed names:
+
+- **Helm** (`helm install luks-csi-driver ./luks-csi-driver/`, as shown in
+  [Quick start](#quick-start-any-cluster)): `luks-csi-driver-controller` and
+  `luks-csi-driver-node`. A different release name changes this — substitute
+  `<release-name>-controller` / `<release-name>-node`, or
+  `<release-name>-luks-csi-driver-controller` / `-node` if the release name
+  doesn't already contain "luks-csi-driver".
+- **Raw manifests** (`manifests/rbac.yaml`): fixed names, `luks-csi-controller`
+  and `luks-csi-node`.
+
+This is different from the kopf operator, which uses `encrypted-volume-operator`
+in `default`.
 
 ```bash
+# Use the pair matching your deployment method — see above:
+#   Helm (release name "luks-csi-driver"): luks-csi-driver-controller, luks-csi-driver-node
+#   Raw manifests (manifests/rbac.yaml):   luks-csi-controller, luks-csi-node
 kubectl exec vault-0 -- vault write auth/kubernetes/role/luks-csi-role \
-    bound_service_account_names="luks-csi-controller,luks-csi-node" \
+    bound_service_account_names="<controller-sa-name>,<node-sa-name>" \
     bound_service_account_namespaces="kube-system" \
     policies="luks-policy" \
     ttl="24h"
