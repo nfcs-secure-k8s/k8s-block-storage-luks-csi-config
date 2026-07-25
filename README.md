@@ -175,14 +175,14 @@ in the `kube-system` namespace), both of which must be included in the role. Thi
 different from the kopf operator, which uses `encrypted-volume-operator` in `default`.
 
 ```bash
-kubectl exec vault-0 -- vault write auth/kubernetes/role/luks-operator-role \
+kubectl exec vault-0 -- vault write auth/kubernetes/role/luks-csi-role \
     bound_service_account_names="luks-csi-controller,luks-csi-node" \
     bound_service_account_namespaces="kube-system" \
     policies="luks-policy" \
     ttl="24h"
 ```
 
-The role name (`luks-operator-role`) matches the default in `luks-csi-driver/values.yaml`.
+The role name (`luks-csi-role`) matches the default in `luks-csi-driver/values.yaml`.
 Change both if you use a different name.
 
 ### 4. Create the Vault policy
@@ -274,7 +274,7 @@ Identify a StorageClass in your cluster that provisions raw block volumes (e.g.
 helm install luks-csi-driver ./luks-csi-driver/ \
   --namespace kube-system \
   --set vault.address="http://vault.default.svc.cluster.local:8200" \
-  --set vault.role="luks-operator-role" \
+  --set vault.role="luks-csi-role" \
   --set storageClass.backingStorageClass="<your-block-storageclass>" \
   --set storageClass.institution="<your-institution>"
 ```
@@ -284,7 +284,7 @@ Key values to customise (all in `luks-csi-driver/values.yaml`):
 | Value | Default | Description |
 |---|---|---|
 | `vault.address` | `http://vault.default.svc.cluster.local:8200` | Vault API URL reachable from the cluster |
-| `vault.role` | `luks-operator-role` | Vault Kubernetes auth role (must match Vault prerequisites) |
+| `vault.role` | `luks-csi-role` | Vault Kubernetes auth role (must match Vault prerequisites) |
 | `storageClass.backingStorageClass` | `local-path` | Underlying raw block StorageClass |
 | `storageClass.institution` | `default` | Namespaces LUKS keys in Vault per tenant |
 | `storageClass.deletionPolicy` | `Delete` | `Delete` destroys the Vault key on PVC deletion; `Retain` keeps it |
