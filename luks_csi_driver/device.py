@@ -42,6 +42,8 @@ Implement a Resolver subclass and insert it into RESOLVERS before ByIdResolver:
 import hashlib
 import logging
 import os
+import re
+import stat
 import time
 from abc import ABC, abstractmethod
 
@@ -68,6 +70,80 @@ class Resolver(ABC):
 
     @abstractmethod
     def resolve(self, pv) -> str | None: ...
+
+
+# Kubernetes pod UIDs are RFC 4122 UUIDs; PV names are DNS-1123 subdomains.
+_POD_UID_RE  = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+_PV_NAME_RE  = re.compile(r"^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$")
+# sysfs DEVNAME: a node directly under /dev, optionally one directory deep.
+_DEVNAME_RE  = re.compile(r"^[a-zA-Z0-9_-]{1,64}(/[a-zA-Z0-9_-]{1,64})?$")
+
+_KUBELET_PUBLISH_SUBDIR = "plugins/kubernetes.io/csi/volumeDevices/publish"
+
+
+def _stat_block_rdev(path: str) -> tuple[int, int] | None:
+    """Return (major, minor) if path (following symlinks) is a block device, else None."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if not stat.S_ISBLK(st.st_mode):
+        return None
+    return os.major(st.st_rdev), os.minor(st.st_rdev)
+
+
+class KubeletPublishResolver(Resolver):
+    """
+    Backend-agnostic resolver for any CSI driver that supports volumeMode: Block.
+
+    Once the staging pod is Running, kubelet has bind-mounted the backing
+    device node at <kubelet_root>/<publish subdir>/<pv-name>/<staging-pod-uid>.
+    Its major:minor is mapped to a /dev name through
+    /sys/dev/block/<maj>:<min>/uevent and cross-checked against /dev, since the
+    publish layout is kubelet-internal rather than a stable API.
+
+    Returns None when not applicable (no staging pod, non-CSI PV, nothing
+    published) so the backend-specific resolvers can be tried instead; raises
+    ValueError on input or results that look tampered with.
+    """
+
+    def __init__(self, kubelet_root="/var/lib/kubelet", sys_root="/sys", dev_root="/dev",
+                 rdev=_stat_block_rdev):
+        self._kubelet_root = kubelet_root
+        self._sys_root = sys_root
+        self._dev_root = dev_root
+        self._rdev = rdev
+
+    def resolve(self, pv, staging_pod_uid: str | None = None) -> str | None:
+        if not staging_pod_uid or not _csi_spec(pv):
+            return None
+        pv_name = pv.metadata.name or ""
+        if not _PV_NAME_RE.match(pv_name) or ".." in pv_name:
+            raise ValueError(f"invalid PV name {pv_name!r}")
+        if not _POD_UID_RE.match(staging_pod_uid):
+            raise ValueError(f"invalid staging pod UID {staging_pod_uid!r}")
+
+        publish = os.path.join(self._kubelet_root, _KUBELET_PUBLISH_SUBDIR, pv_name, staging_pod_uid)
+        rdev = self._rdev(publish)
+        if rdev is None:
+            LOG.info("No published block device at %s", publish)
+            return None
+
+        dev = os.path.join(self._dev_root, self._devname(*rdev))
+        if self._rdev(dev) != rdev:
+            raise ValueError(f"rdev mismatch: {dev} is not {rdev[0]}:{rdev[1]}")
+        return dev
+
+    def _devname(self, major: int, minor: int) -> str:
+        uevent = os.path.join(self._sys_root, "dev", "block", f"{major}:{minor}", "uevent")
+        with open(uevent) as f:
+            for line in f:
+                if line.startswith("DEVNAME="):
+                    name = line.strip()[len("DEVNAME="):]
+                    if not _DEVNAME_RE.match(name):
+                        raise ValueError(f"unsafe DEVNAME {name!r} for {major}:{minor}")
+                    return name
+        raise ValueError(f"no DEVNAME in {uevent}")
 
 
 class LocalResolver(Resolver):
@@ -145,6 +221,9 @@ class ByIdResolver(Resolver):
 # as an insertion point when registering new resolvers (see module docstring).
 _by_id_resolver = ByIdResolver()
 
+# Tried before RESOLVERS whenever a staging pod exists (see resolve_device_path).
+_kubelet_resolver = KubeletPublishResolver()
+
 RESOLVERS: list[Resolver] = [
     LocalResolver(),
     LonghornResolver(),
@@ -218,8 +297,16 @@ def _staging_pod_name(volume_id: str) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-def resolve_device_path(pv) -> str | None:
-    """Try each resolver in RESOLVERS order; return the first non-None result."""
+def resolve_device_path(pv, staging_pod_uid: str | None = None) -> str | None:
+    """
+    Return the device kubelet published for the staging pod if available,
+    otherwise try each resolver in RESOLVERS order and return the first
+    non-None result.
+    """
+    path = _kubelet_resolver.resolve(pv, staging_pod_uid)
+    if path:
+        LOG.info("Resolved PV %s to %s via kubelet publish path", pv.metadata.name, path)
+        return path
     for resolver in RESOLVERS:
         path = resolver.resolve(pv)
         if path:
@@ -248,9 +335,10 @@ def ensure_staged(
     backing_pvc_namespace: str,
     node_name: str,
     timeout: int = STAGING_TIMEOUT,
-) -> None:
+) -> str | None:
     """
-    Ensure the backing block device is present on node_name.
+    Ensure the backing block device is present on node_name, returning the
+    staging pod UID (kubelet keys the published device by it).
 
     For CSI-backed PVs this creates a pause pod that mounts the backing PVC as
     a raw block device, pinned to node_name.  Kubelet's CSI machinery then calls
@@ -258,10 +346,11 @@ def ensure_staged(
     the block device appear on the node.  The pod remains until release_staged is
     called from NodeUnstageVolume.
 
-    No-op for non-CSI PVs (local, hostPath) where the device is always present.
+    No-op returning None for non-CSI PVs (local, hostPath) where the device is
+    always present.
     """
     if not _csi_spec(pv):
-        return
+        return None
 
     # The staging pod must be in the same namespace as the backing PVC —
     # Kubernetes does not allow cross-namespace PVC references in pod specs.
@@ -320,7 +409,7 @@ def ensure_staged(
         phase = pod.status.phase if pod.status else None
         if phase == "Running":
             LOG.info("Staging pod %s/%s is Running", ns, pod_name)
-            return
+            return pod.metadata.uid
         if phase in ("Failed", "Succeeded"):
             raise RuntimeError(
                 f"Staging pod {ns}/{pod_name} entered phase {phase} unexpectedly"
@@ -377,14 +466,17 @@ def attach_and_resolve(
     1. Fetch the backing PV.
     2. Create a staging pod so kubelet triggers the backing driver's
        NodeStageVolume (e.g. rbd map), making the block device appear.
-    3. Resolve the device path via the RESOLVERS registry.
+    3. Resolve the device path: kubelet's published device for the staging
+       pod first, then the RESOLVERS registry.
     4. Wait for the device file to appear on the node.
 
     Returns the block device path ready for cryptsetup.
     """
     pv = k8s.core().read_persistent_volume(pv_name)
-    ensure_staged(volume_id, pv, backing_pvc_name, backing_pvc_namespace, node_name, timeout=staging_timeout)
-    path = resolve_device_path(pv)
+    staging_pod_uid = ensure_staged(
+        volume_id, pv, backing_pvc_name, backing_pvc_namespace, node_name, timeout=staging_timeout
+    )
+    path = resolve_device_path(pv, staging_pod_uid)
     if not path:
         raise ValueError(f"Cannot determine block device path from PV {pv_name!r}")
     wait_for_device(path, timeout=device_timeout)
